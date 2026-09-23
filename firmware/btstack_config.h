@@ -1,0 +1,23 @@
+#ifndef BTSTACK_CONFIG_H
+#define BTSTACK_CONFIG_H
+
+// Port related features
+#define HAVE_MALLOC
+
+// BTstack features (ENABLE_BLE defined by CMake via ENABLE_BLE=1)
+#define ENABLE_LE_PERIPHERAL
+#define ENABLE_LOG_ERROR
+#define ENABLE_LOG_INFO
+#define ENABLE_PRINTF_HEXDUMP
+#define ENABLE_PRINTF_TO_LOG
+
+// BTstack configuration
+#define HCI_ACL_PAYLOAD_SIZE 124
+#define HCI_ACL_CHUNK_SIZE_ALIGNMENT 4
+#define HCI_OUTGOING_PRE_BUFFER_SIZE 4
+#define MAX_ATT_DB_SIZE 1000
+#define MAX_NR_LE_DEVICE_DB_ENTRIES 1
+#define NVM_NUM_DEVICE_DB_ENTRIES 1
+#define MAX_NR_HCI_CONNECTIONS 1
+
+#endif

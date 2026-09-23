@@ -1,0 +1,16 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "pico2w-test",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-pico2w-test",
+      "cacheVariables": {
+        "PICO_BOARD": "pico2_w",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "PICO_CLIB": "picolibc"
+      }
+    }
+  ],
+  "buildPresets": [{"name": "pico2w-test", "configurePreset": "pico2w-test", "jobs": 2}]
+}

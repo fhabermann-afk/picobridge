@@ -1,0 +1,16 @@
+/build*/
+/.venv/
+/vendor/
+/dist/*
+!/dist/README.md
+/private/
+/firmware/noise_ik_keys.h
+*.uf2
+*.elf
+*.bin
+*.map
+__pycache__/
+.pytest_cache/
+/host/android/.gradle/
+/host/android/local.properties
+/host/android/**/build/
