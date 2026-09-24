@@ -6,6 +6,7 @@ Type a secret into whatever window you focus after the countdown:
 
 ```bash
 pico-send                          # hidden password prompt, 5 s countdown, Enter after
+pico-send --clipboard              # read the password copied by KeePassXC/KeepassX
 pico-send -t "https://example.com" # visible text mode (NOT for secrets), Enter after
 pico-send -d 10 --no-enter         # 10 s to focus the window, no trailing Enter
 echo pw | pico-send --stdin        # pipe a secret in
@@ -14,6 +15,13 @@ printf %s "$pw" | pico-send --stdin --mode password --layout us
 
 Behaviour that matters:
 
+- **`--clipboard`** reads the graphical clipboard directly (KeePassXC,
+  KeepassX, etc.), so the secret never appears in shell history or argv. It
+  deliberately **does not clear the clipboard**: password managers already
+  clear it on their configured timeout, while clearing it here could destroy
+  a newer copy made after this command started. On Wayland it uses
+  `wl-paste` (package `wl-clipboard`); on X11 it uses `xclip` or
+  `xsel`. Run it in the relevant graphical session.
 - **Never pass secrets as argv** — shell history and `/proc/<pid>/cmdline`
   leak them. Use the hidden prompt, `--stdin`, or a 0600 file.
 - **`--layout us|de` must match the keyboard layout of the *target*

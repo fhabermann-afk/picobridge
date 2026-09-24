@@ -22,6 +22,8 @@ import getpass
 import importlib.util
 import os
 import secrets
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -51,6 +53,37 @@ async def connect_with_retry(ctl, retries, timeout):
     raise SystemExit(f"giving up after {retries} scan attempts: {last}")
 
 
+def clipboard_backend():
+    """Pick the clipboard reader/writer pair for this session, or None."""
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-paste") and shutil.which("wl-copy"):
+        return "wayland"
+    if os.environ.get("DISPLAY") or os.environ.get("XAUTHORITY"):
+        if shutil.which("xclip"):
+            return "xclip"
+        if shutil.which("xsel"):
+            return "xsel"
+    return None
+
+
+def clipboard_read(backend):
+    cmd = {"wayland": ["wl-paste", "-n"],
+           "xclip": ["xclip", "-selection", "clipboard", "-o"],
+           "xsel": ["xsel", "--clipboard", "--output"]}[backend]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise SystemExit(f"clipboard read failed ({result.stderr.decode(errors='replace').strip()})")
+    # Clipboard copies of secrets never carry meaningful trailing newlines;
+    # and in password mode the firmware would reject them anyway.
+    return result.stdout.rstrip(b"\r\n")
+
+
+def clipboard_clear(backend):
+    cmd = {"wayland": ["wl-copy"],
+           "xclip": ["xclip", "-selection", "clipboard"],
+           "xsel": ["xsel", "--clipboard", "--clear"]}[backend]
+    subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True)
+
+
 def resolve_default_identity():
     """Pick the first existing Noise identity; fall back to the canonical path."""
     candidates = [
@@ -67,7 +100,12 @@ def resolve_default_identity():
 async def run(args):
     ctl = load_ctl()
 
-    if args.stdin:
+    if args.clipboard:
+        backend = clipboard_backend()
+        if backend is None:
+            raise SystemExit("No usable clipboard backend: install wl-clipboard (Wayland) or xclip/xsel (X11), and run inside that graphical session.")
+        raw = clipboard_read(backend)
+    elif args.stdin:
         raw = sys.stdin.buffer.read().rstrip(b"\n")
     elif args.text is not None:
         raw = args.text.encode("utf-8")
@@ -127,6 +165,8 @@ def main():
     parser.add_argument("-t", "--text", help="Pass text directly (visible mode, NOT for passwords!)")
     parser.add_argument("--visible", action="store_true", help="Enter text interactively with echo")
     parser.add_argument("--stdin", action="store_true", help="Read the secret from stdin")
+    parser.add_argument("--clipboard", action="store_true",
+                        help="Read secret from the system clipboard (KeePassXC etc.); does not clear it")
     parser.add_argument("--mode", choices=["password", "text"], default="password",
                         help="Mode for prompt/stdin (default: password, hidden)")
     parser.add_argument("-d", "--delay", type=int, default=5,
@@ -141,6 +181,9 @@ def main():
     parser.add_argument("--retries", type=int, default=5, help="BLE scan retries")
     parser.add_argument("--timeout", type=int, default=10, help="BLE scan timeout (s)")
     args = parser.parse_args()
+    sources = sum((args.stdin, args.clipboard, args.text is not None, args.visible))
+    if sources > 1:
+        raise SystemExit("Choose exactly one input source: --stdin, --clipboard, --text, or --visible.")
     if args.delay < 0 or args.delay > 300:
         raise SystemExit("--delay must be between 0 and 300 seconds.")
     try:

@@ -47,8 +47,8 @@ python3 tools/noise_ik_provision.py --out ../enroll/device-01
 # 3. Flash via BOOTSEL, install the controller identity on your BLE host
 #    (exact steps: docs/BUILD-AND-FLASH.md, docs/PROVISIONING.md)
 
-# 4. Type a secret into whatever window you focus within the next seconds:
-echo 'hunter2' | tools/pico_send.py --stdin -d 5 --layout de
+# 4. Copy a secret in KeePassXC, then type it into the window you focus:
+tools/pico_send.py --clipboard -d 5 --layout de
 ```
 
 ## Layout ceiling (read this twice)
