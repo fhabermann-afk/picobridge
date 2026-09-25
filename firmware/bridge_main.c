@@ -347,6 +347,8 @@ err:
 }
 
 /* ---- BLE setup ---- */
+static void ble_event_handler(uint8_t packet_type, uint16_t event, uint8_t *data, uint16_t size);
+
 static void ble_setup(void) {
     if (!cyw43_ok) return;
 
@@ -401,13 +403,50 @@ static void ble_setup(void) {
     gap_advertisements_set_data(pos, adv_data);
     gap_advertisements_enable(1);
 
+    /* Watch for disconnections so advertising can be re-armed below */
+    static btstack_packet_callback_registration_t ble_event_reg;
+    ble_event_reg.callback = ble_event_handler;
+    hci_add_event_handler(&ble_event_reg);
+
     /* Power on BLE */
     hci_power_control(HCI_POWER_ON);
 }
 
+/* BTstack's CYW43 advertiser does not reliably restart advertising after a
+ * central disconnects, and even where enable(1) works it can lag ~20 s.
+ * Set a flag in the HCI callback (no timers there) and let the main loop
+ * force-restart via disable+enable — that deterministically re-arms the
+ * advertiser within one loop pass. gap_advertisements_enable is idempotent,
+ * so skipping the restart while still connected is safe. */
+static volatile bool readvertise_needed = false;
+static uint32_t readvertise_disable_ms = 0;
+
+static void ble_event_handler(uint8_t packet_type, uint16_t event, uint8_t *data, uint16_t size) {
+    (void)packet_type; (void)data; (void)size;
+    if (event == HCI_EVENT_DISCONNECTION_COMPLETE) {
+        readvertise_needed = true;
+    }
+}
+
+/* Called from the main loop: force advertising back on ~100ms after a
+ * disconnect. BlueZ page attempts last several seconds, so being visible
+ * again fast is what cuts the next connect from ~20s to ~1-2s. */
+static void ble_readvertise_poll(uint32_t now_ms) {
+    if (!readvertise_needed) return;
+    if (readvertise_disable_ms == 0) {
+        gap_advertisements_enable(0);
+        readvertise_disable_ms = now_ms + 100;
+        return;
+    }
+    if ((int32_t)(now_ms - readvertise_disable_ms) < 0) return;
+    gap_advertisements_enable(1);
+    readvertise_disable_ms = 0;
+    readvertise_needed = false;
+}
+
 /* The first multi-controller boot seeds the immutable recovery admin, then
  * imports the existing single-controller identity as a normal admin so a
- * firmware upgrade never locks out the existing controller. Later boots never auto-add keys. */
+ * firmware upgrade never locks out CachyOS. Later boots never auto-add keys. */
 static bool controller_setup(void) {
     if (controller_store_flash_boot_or_seed(&controllers, PICO_BRIDGE_RECOVERY_ADMIN_PUBLIC) != CONTROLLER_STORE_OK) {
         return false;
@@ -479,6 +518,7 @@ int main(void) {
         /* BLE run loop — pumps BTstack via async context */
         if (cyw43_ok) {
             async_context_poll(cyw43_arch_async_context());
+            ble_readvertise_poll(usb_now_ms);
         }
 
         /* LED indicator */
