@@ -70,10 +70,14 @@ async def connect_fast(ctl, timeout, retries, rescan):
     2. Otherwise scan with an early-exit callback: as soon as the first
        PicoBridge advert, the scan stops — BleakScanner.discover() always
        burns its full timeout, which is the 10 s most users notice.
+    LeNumPeriods=60 shortens the BlueZ LE page: the default paging schedule
+    waits ~1.28 s per period and easily burns 10-16 s even when the device
+    advertises immediately (measured 16.7 s -> 4.3 s on the target host).
     Retries the whole sequence on intermittent BLE failures.
     """
     from bleak import BleakClient, BleakScanner
 
+    FAST_PAGE = {"bluez": {"LeNumPeriods": 60}}
     last = None
     for attempt in range(1, retries + 1):
         if attempt > 1:
@@ -82,7 +86,7 @@ async def connect_fast(ctl, timeout, retries, rescan):
         if cached:
             try:
                 client = BleakClient(cached)
-                await asyncio.wait_for(client.connect(), timeout=timeout)
+                await asyncio.wait_for(client.connect(**FAST_PAGE), timeout=timeout)
                 print(f"  cached device {cached} connected", file=sys.stderr)
                 return cached, client
             except Exception as exc:
@@ -112,7 +116,7 @@ async def connect_fast(ctl, timeout, retries, rescan):
             if match is None:
                 raise RuntimeError("No PicoBridge device found in range.")
             client = BleakClient(match)
-            await asyncio.wait_for(client.connect(), timeout=timeout)
+            await asyncio.wait_for(client.connect(**FAST_PAGE), timeout=timeout)
             write_cached_device(client.address if hasattr(client, "address") else match.address)
             return match.address, client
         except Exception as exc:

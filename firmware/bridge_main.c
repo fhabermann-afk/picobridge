@@ -401,6 +401,16 @@ static void ble_setup(void) {
         adv_data[pos++] = (uint8_t)name[i];
     }
     gap_advertisements_set_data(pos, adv_data);
+    /* BTstack's default advertising interval is 0x0800 (1.28 s) — far too
+     * slow for interactive use: the central's page scan can wait several
+     * intervals before seeing us, making every connect take 6-25 s.
+     * 40 ms keeps discovery/page latency low at negligible power cost for
+     * a USB-powered device. */
+    bd_addr_t any_addr = {0};
+    /* adv_type 0x00 = ADV_TYPE_CONNECTABLE_UNDIRECTED (constant absent in
+     * this BTstack revision's headers) — same as BTstack's own default. */
+    gap_advertisements_set_params(0x0040, 0x0040, 0x00,
+                                  0, any_addr, 0x07, 0x00);
     gap_advertisements_enable(1);
 
     /* Watch for disconnections so advertising can be re-armed below */
