@@ -19,6 +19,7 @@ The device must already be paired/bonded.
 import argparse
 import asyncio
 import base64
+import getpass
 import json
 import struct
 import sys
@@ -58,6 +59,8 @@ CMD_TICK = 4
 CMD_NOISE = 5
 CMD_CONTROLLER_ADD = 7
 CMD_CONTROLLER_REVOKE = 8
+CMD_SET_RADIO = 9
+CMD_CLEAR_RADIO = 10
 
 # Bridge modes (must match bridge_core.h)
 BRIDGE_LAYOUT_US = 1
@@ -543,6 +546,57 @@ async def cmd_controller_revoke(args):
         await client.disconnect()
 
 
+def build_set_radio_packet(ssid: bytes, psk: bytes) -> bytes:
+    """Frame for CMD_SET_RADIO; length checks mirror the firmware's schema 2."""
+    if not 1 <= len(ssid) <= 32:
+        raise NoiseHandshakeError("SSID must be 1..32 bytes")
+    if not 8 <= len(psk) <= 63:
+        raise NoiseHandshakeError("PSK must be 8..63 bytes")
+    for value in (ssid, psk):
+        if any(byte < 32 or byte > 126 for byte in value):
+            raise NoiseHandshakeError("SSID/PSK must be printable ASCII")
+    return bytes([CMD_SET_RADIO, len(ssid), len(psk)]) + ssid + psk
+
+
+async def cmd_set_radio(args):
+    """Provision Wi-Fi credentials over the authenticated BLE session.
+
+    The password is read hidden (or from a 0600 regular file); never argv.
+    The device only accepts this command while no USB host is mounted.
+    """
+    if args.psk_file is not None:
+        path = Path(args.psk_file).expanduser()
+        try:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                raise NoiseHandshakeError("PSK file must be a regular file")
+            if info.st_mode & 0o077:
+                raise NoiseHandshakeError("PSK file must have mode 0600 or stricter")
+            raw = path.read_bytes().rstrip(b"\r\n")
+        except OSError as exc:
+            raise NoiseHandshakeError(f"cannot read PSK file: {exc}") from exc
+    else:
+        raw = getpass.getpass("Wi-Fi passphrase (hidden): ").encode("utf-8")
+    device, client = await scan_and_connect(args.timeout)
+    try:
+        noise = await perform_noise_handshake(client, args.noise_identity)
+        await send_command(client, build_set_radio_packet(args.ssid.encode("utf-8"), raw), noise=noise)
+        LOG.info("Radio credentials stored and verified on device [authenticated]")
+    finally:
+        await client.disconnect()
+
+
+async def cmd_clear_radio(args):
+    """Erase provisioned Wi-Fi credentials (admin, unmounted device)."""
+    device, client = await scan_and_connect(args.timeout)
+    try:
+        noise = await perform_noise_handshake(client, args.noise_identity)
+        await send_command(client, bytes([CMD_CLEAR_RADIO]), noise=noise)
+        LOG.info("Radio credentials erased [authenticated]")
+    finally:
+        await client.disconnect()
+
+
 def add_noise_identity_argument(command):
     command.add_argument(
         "--noise-identity", type=Path,
@@ -611,6 +665,19 @@ def main():
     controller_revoke.add_argument("--timeout", type=int, default=10)
     add_noise_identity_argument(controller_revoke)
     controller_revoke.set_defaults(func=cmd_controller_revoke)
+
+    set_radio = sub.add_parser("set-radio", help="Provision Wi-Fi credentials (device must be unmounted)")
+    set_radio.add_argument("--ssid", required=True)
+    set_radio.add_argument("--psk-file", default=None,
+                           help="0600 file with the passphrase; hidden prompt when omitted")
+    set_radio.add_argument("--timeout", type=int, default=10)
+    add_noise_identity_argument(set_radio)
+    set_radio.set_defaults(func=cmd_set_radio)
+
+    clear_radio = sub.add_parser("clear-radio", help="Erase Wi-Fi credentials (admin, unmounted)")
+    clear_radio.add_argument("--timeout", type=int, default=10)
+    add_noise_identity_argument(clear_radio)
+    clear_radio.set_defaults(func=cmd_clear_radio)
 
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()

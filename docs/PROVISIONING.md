@@ -108,3 +108,31 @@ on the device: staged strings live in RAM, are wiped after typing/cancel/TTL,
 and are never written to flash. Stealing the Pico yields its device key —
 enough to *look like* the device to your controller, but never enough to
 recover any password. Keep controller identities on the controller.
+
+## 5. Wi-Fi provisioning (SET_RADIO)
+
+Devices built with Wi-Fi support join a WPA2-PSK network so controllers can
+reach them over the network instead of BLE. Credentials are provisioned over
+the same authenticated Noise channel — never over the air unauthenticated,
+never via a mass-storage file:
+
+```
+python3 tools/pico_bridge_ctl.py set-radio --ssid MyNetwork
+# passphrase is prompted hidden, or read from a 0600 file via --psk-file
+python3 tools/pico_bridge_ctl.py clear-radio
+```
+
+Rules enforced by the firmware:
+
+- **Admin only.** Operator-role controllers cannot change radio settings.
+- **Bench only.** The command is rejected while a USB host is mounted
+  (`tud_mounted()`): rotating credentials requires someone physically at the
+  device, and a relayed BLE session cannot reconfigure a deployed bridge.
+- Schema 2 record (`PBRAD02`) in a dedicated flash sector: SSID 1–32 bytes,
+  PSK 8–63 bytes, printable ASCII only, CRC32-checked, written and verified
+  byte-for-byte before the command acknowledges. `clear-radio` erases it.
+- An invalid or absent record means **no radio**: the device never falls back
+  to an open network.
+
+The stored record is link credentials only; the Noise controller identities
+are unaffected. Rotating Wi-Fi passwords is one `set-radio` away.

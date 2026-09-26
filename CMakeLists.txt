@@ -19,6 +19,7 @@ pico_add_extra_outputs(pico_bridge_idle)
 
 add_executable(pico_bridge firmware/bridge_main.c firmware/usb_descriptors.c
     firmware/core/bridge_core.c firmware/radio/radio_config.c
+    firmware/radio/radio_provision_flash.c
     firmware/radio/http_parser.c firmware/radio/entropy_fill.c
     firmware/radio/dhcp_wire.c firmware/noise_ik.c firmware/controller_store.c
     firmware/controller_store_flash.c)

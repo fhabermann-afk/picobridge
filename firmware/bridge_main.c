@@ -29,6 +29,7 @@
 #include "ble/gatt_client.h"
 #include "bridge_core.h"
 #include "controller_store_flash.h"
+#include "radio_provision_flash.h"
 #include "noise_ik.h"
 #include "noise_ik_keys.h"
 #include "recovery_admin_public.h"
@@ -45,6 +46,10 @@ extern void bridge_usb_set_identity(const char *serial, bool radio_ok);
 #define BLE_CMD_ENCRYPTED 6u /* nonce64 || ciphertext || tag */
 #define BLE_CMD_CONTROLLER_ADD 7u    /* role(1) || X25519 public key(32) */
 #define BLE_CMD_CONTROLLER_REVOKE 8u /* target slot(1) */
+#define BLE_CMD_SET_RADIO 9u    /* ssid_len(1) || psk_len(1) || ssid || psk
+                                 * (admin role, and only while no USB host is
+                                 * mounted: provisioning happens at the bench) */
+#define BLE_CMD_CLEAR_RADIO 10u /* no payload; admin only */
 
 #define BRIDGE_TTL_MS     BRIDGE_MAX_TTL_MS
 
@@ -222,6 +227,36 @@ static bridge_status_t ble_handle_controller_revoke(const uint8_t *p, uint16_t l
     return BRIDGE_OK;
 }
 
+static bridge_status_t ble_handle_set_radio(const uint8_t *p, uint16_t len) {
+    if (len < 3u) return BRIDGE_ERR_ARGUMENT;
+    if (!controller_store_is_admin(&controllers, noise_authenticated_slot())) return BRIDGE_ERR_OWNER;
+    /* Physical-presence gate: (re)provisioning only while no USB host owns
+     * the HID interface. Whoever rotates Wi-Fi credentials is at the bench,
+     * and a relayed BLE session cannot rewrite radio config of a deployed
+     * device that is actively serving its target machine. */
+    if (tud_mounted()) return BRIDGE_ERR_POLICY;
+    uint8_t ssid_len = p[1], psk_len = p[2];
+    if (len != (uint16_t)(3u + ssid_len + psk_len)) return BRIDGE_ERR_ARGUMENT;
+    /* Static, not stack: a full 4 KiB sector image exceeds PICO_STACK_SIZE. */
+    static uint8_t image[RADIO_SECTOR_SIZE];
+    if (!radio_config_build2((const char *)p + 3, ssid_len,
+                             (const char *)p + 3 + ssid_len, psk_len, image)) {
+        return BRIDGE_ERR_ARGUMENT;
+    }
+    if (!radio_provision_flash_write_and_verify(image)) {
+        memset(image, 0, sizeof(image));
+        return BRIDGE_ERR_STATE;
+    }
+    memset(image, 0, sizeof(image));
+    return BRIDGE_OK;
+}
+
+static bridge_status_t ble_handle_clear_radio(void) {
+    if (!controller_store_is_admin(&controllers, noise_authenticated_slot())) return BRIDGE_ERR_OWNER;
+    if (tud_mounted()) return BRIDGE_ERR_POLICY;
+    return radio_provision_flash_clear() ? BRIDGE_OK : BRIDGE_ERR_STATE;
+}
+
 static bridge_status_t ble_handle_authenticated_command(const uint8_t *data, uint16_t len) {
     if (len == 0) return BRIDGE_ERR_ARGUMENT;
     switch (data[0]) {
@@ -231,6 +266,8 @@ static bridge_status_t ble_handle_authenticated_command(const uint8_t *data, uin
         case BLE_CMD_TICK:    return ble_handle_tick(data, len);
         case BLE_CMD_CONTROLLER_ADD: return ble_handle_controller_add(data, len);
         case BLE_CMD_CONTROLLER_REVOKE: return ble_handle_controller_revoke(data, len);
+        case BLE_CMD_SET_RADIO: return ble_handle_set_radio(data, len);
+        case BLE_CMD_CLEAR_RADIO: return ble_handle_clear_radio();
         default: return BRIDGE_ERR_ARGUMENT;
     }
 }

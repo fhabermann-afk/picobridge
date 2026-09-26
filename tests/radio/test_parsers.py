@@ -12,6 +12,11 @@ class Config(C.Structure):
                 ('cert_len', C.c_size_t), ('key_len', C.c_size_t)]
 LIB.radio_config_parse.argtypes = [C.c_void_p, C.c_size_t, C.POINTER(Config)]
 LIB.radio_config_parse.restype = C.c_bool
+LIB.radio_config_parse2.argtypes = [C.c_void_p, C.c_size_t, C.POINTER(Config)]
+LIB.radio_config_parse2.restype = C.c_bool
+LIB.radio_config_build2.argtypes = [C.c_char_p, C.c_size_t, C.c_char_p, C.c_size_t,
+                                    C.POINTER(C.c_ubyte * 4096)]
+LIB.radio_config_build2.restype = C.c_bool
 
 def sector(ssid=b'Radio test', psk=b'test-only-passphrase-12345', cert=b'cert', key=b'key'):
     payload = struct.pack('<4H',len(ssid),len(psk),len(cert),len(key))+ssid+psk+cert+key
@@ -163,5 +168,68 @@ class EntropyTests(unittest.TestCase):
         rng=RNG(lambda ctx,out:-1); olen=C.c_size_t(999); out=C.create_string_buffer(10)
         self.assertNotEqual(LIB.radio_entropy_fill(out,10,C.byref(olen),rng,None),0)
         self.assertEqual(olen.value,0)
+
+class Schema2Tests(unittest.TestCase):
+    def build(self, ssid=b'StudioWLAN', psk=b'hunter2-secret-pass'):
+        buf = (C.c_ubyte * 4096)()
+        ok = LIB.radio_config_build2(ssid, len(ssid), psk, len(psk), C.byref(buf))
+        return bool(ok), buf
+
+    def parse2(self, buf):
+        o = Config()
+        C.memset(C.byref(o), 0xa5, C.sizeof(o))
+        return LIB.radio_config_parse2(bytes(buf), 4096, C.byref(o)), o
+
+    def test_builder_output_parses_round_trip(self):
+        ok, buf = self.build()
+        self.assertTrue(ok)
+        good, o = self.parse2(buf)
+        self.assertTrue(good)
+        self.assertEqual(o.ssid.rstrip(b'\0'), b'StudioWLAN')
+        self.assertEqual(o.psk.rstrip(b'\0'), b'hunter2-secret-pass')
+        self.assertEqual((o.cert_len, o.key_len), (0, 0))
+
+    def test_builder_rejects_invalid_lengths_and_chars(self):
+        for ssid, psk in [(b'', b'x' * 20), (b'x' * 33, b'x' * 20),
+                          (b'S', b'x' * 7), (b'S', b'x' * 64),
+                          (b'S\n', b'x' * 20), (b'S', b'x' * 19 + b'\x7f'),
+                          (b'S', b'\x80' + b'x' * 19)]:
+            with self.subTest(ssid=len(ssid), psk=len(psk)):
+                buf = (C.c_ubyte * 4096)()
+                self.assertFalse(LIB.radio_config_build2(ssid, len(ssid), psk, len(psk), C.byref(buf)))
+
+    def test_schema2_rejects_schema1_bytes(self):
+        s = sector()
+        self.assertFalse(self.parse2(s)[0])
+
+    def test_schema1_rejects_schema2_bytes(self):
+        ok, buf = self.build()
+        self.assertTrue(ok)
+        o = Config()
+        self.assertFalse(LIB.radio_config_parse(bytes(buf), 4096, C.byref(o)))
+
+    def test_psk_min_8_accepted(self):
+        ok, buf = self.build(psk=b'abcdefgh')
+        self.assertTrue(ok)
+        self.assertTrue(self.parse2(buf)[0])
+        ok, buf = self.build(psk=b'abcdefg')
+        self.assertFalse(ok)
+
+    def test_crc_corruption_and_trailing_junk(self):
+        ok, buf = self.build()
+        self.assertTrue(ok)
+        view = bytearray(bytes(buf))
+        view[25] ^= 1
+        self.assertFalse(LIB.radio_config_parse2(bytes(view), 4096, C.byref(Config())))
+        view = bytearray(bytes(buf)); view[3000] = 0
+        self.assertFalse(LIB.radio_config_parse2(bytes(view), 4096, C.byref(Config())))
+
+    def test_cert_len_nonzero_without_key_fails(self):
+        ok, buf = self.build()
+        self.assertTrue(ok)
+        view = bytearray(bytes(buf))
+        view[20] = 5  # cert length nonzero, key length stays 0
+        self.assertFalse(LIB.radio_config_parse2(bytes(view), 4096, C.byref(Config())))
+
 
 if __name__=='__main__': unittest.main()

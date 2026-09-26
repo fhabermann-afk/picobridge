@@ -818,5 +818,36 @@ class FirmwareNoiseKeyContractTests(unittest.TestCase):
         self.assertIn("priv[31] |= 0x40u;", body)
 
 
+class SetRadioPacketTests(unittest.TestCase):
+    """CMD_SET_RADIO framing must match ble_handle_set_radio in firmware."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "pico_bridge_ctl_full", ROOT / "tools" / "pico_bridge_ctl.py")
+        self.ctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ctl)
+
+    def test_frame_layout(self):
+        packet = self.ctl.build_set_radio_packet(b'Studio', b'secret-pass-123')
+        self.assertEqual(packet[0], 9)
+        self.assertEqual(packet[1], 6)
+        self.assertEqual(packet[2], 15)
+        self.assertEqual(packet[3:], b'Studio' + b'secret-pass-123')
+
+    def test_bounds_mirror_firmware(self):
+        for ssid, psk in [(b'', b'x' * 20), (b'x' * 33, b'x' * 20),
+                          (b'S', b'x' * 7), (b'S', b'x' * 64)]:
+            with self.subTest(ssid=len(ssid), psk=len(psk)):
+                with self.assertRaises(self.ctl.NoiseHandshakeError):
+                    self.ctl.build_set_radio_packet(ssid, psk)
+
+    def test_non_ascii_rejected(self):
+        with self.assertRaises(self.ctl.NoiseHandshakeError):
+            self.ctl.build_set_radio_packet(b'Studio', b'passw\xc3\xb6rter')
+
+    def test_clear_radio_constant(self):
+        self.assertEqual(self.ctl.CMD_CLEAR_RADIO, 10)
+
+
 if __name__ == "__main__":
     unittest.main()
