@@ -14,3 +14,5 @@ __pycache__/
 /host/android/.gradle/
 /host/android/local.properties
 /host/android/**/build/
+tests/radio/.build/
+tests/radio/tdd.log

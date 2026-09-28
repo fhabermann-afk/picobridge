@@ -199,7 +199,8 @@ class UUIDContractTests(unittest.TestCase):
             r"if \(buffer == NULL\) return cmd_char_read_len;",
             "BTstack's dynamic-read size query must return the current authenticated response length",
         )
-        self.assertIn("cmd_char_read_len = (uint16_t)response_len;", source)
+        self.assertIn("cmd_char_read_len = n;", source)
+        self.assertIn("cmd_char_read_valid = true;", source)
 
 
 class PasswordInputPolicyTests(unittest.IsolatedAsyncioTestCase):
@@ -759,17 +760,17 @@ class FirmwareMutualNoiseContractTests(unittest.TestCase):
         source = (ROOT / "firmware" / "bridge_main.c").read_text()
         self.assertRegex(
             source,
-            r"static bridge_status_t ble_handle_authenticated_command\(",
-            "authenticated dispatch must expose the bridge-core result",
+            r"static bool ble_handle_authenticated_command\(",
+            "authenticated dispatch must report whether a receipt is due",
         )
         self.assertRegex(
             source,
-            r"bridge_status_t command_status\s*=\s*ble_handle_authenticated_command\(",
+            r"cmd_ack_status = \(uint8_t\)status;",
             "encrypted handler must retain the dispatched command status",
         )
         self.assertRegex(
             source,
-            r"noise_encrypt_transport_ack\(\(uint8_t\)command_status,",
+            r"noise_encrypt_transport_ack\(cmd_ack_status,",
             "the encrypted receipt must carry the bridge command status",
         )
 

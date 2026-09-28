@@ -30,6 +30,9 @@
 #include "bridge_core.h"
 #include "controller_store_flash.h"
 #include "radio_provision_flash.h"
+#ifdef BRIDGE_ENABLE_NET
+#include "net_endpoint.h"
+#endif
 #include "noise_ik.h"
 #include "noise_ik_keys.h"
 #include "recovery_admin_public.h"
@@ -72,6 +75,9 @@ static controller_store_t controllers;
 static uint32_t usb_now_ms;
 static uint32_t ble_now_ms;
 static bool cyw43_ok;
+/* Command status of the last authenticated command; filled by
+ * ble_handle_authenticated_command, consumed by the responding transport. */
+static uint8_t cmd_ack_status;
 
 /* ---- USB HID keyboard ---- */
 static uint8_t hid_leds;
@@ -186,20 +192,6 @@ static bridge_status_t ble_handle_tick(const uint8_t *p, uint16_t len) {
     return bridge_core_tick(&core, tick_now);
 }
 
-static void ble_handle_noise(const uint8_t *p, uint16_t len) {
-    size_t response_len = 0;
-    cmd_char_read_valid = false;
-    cmd_char_read_len = 0;
-    if (len != (uint16_t)(1u + NOISE_IK_INIT_MESSAGE_LEN)) return;
-    if (noise_ik_handshake_respond(p + 1, NOISE_IK_INIT_MESSAGE_LEN,
-                                   cmd_char_read_data, sizeof(cmd_char_read_data),
-                                   &response_len) == 0 &&
-        response_len == NOISE_IK_RESPONSE_LEN) {
-        cmd_char_read_len = (uint16_t)response_len;
-        cmd_char_read_valid = true;
-    }
-}
-
 static bridge_status_t ble_handle_controller_add(const uint8_t *p, uint16_t len) {
     if (len != 34u || !controller_store_is_admin(&controllers, noise_authenticated_slot())) return BRIDGE_ERR_OWNER;
     controller_role_t role = (controller_role_t)p[1];
@@ -257,55 +249,87 @@ static bridge_status_t ble_handle_clear_radio(void) {
     return radio_provision_flash_clear() ? BRIDGE_OK : BRIDGE_ERR_STATE;
 }
 
-static bridge_status_t ble_handle_authenticated_command(const uint8_t *data, uint16_t len) {
-    if (len == 0) return BRIDGE_ERR_ARGUMENT;
+static bool ble_handle_authenticated_command(const uint8_t *data, uint16_t len) {
+    /* Returns true when a receipt must be armed on the responding
+     * transport; command status travels in cmd_ack_status. */
+    if (len == 0) { cmd_ack_status = BRIDGE_ERR_ARGUMENT; return false; }
+    bridge_status_t status;
     switch (data[0]) {
-        case BLE_CMD_STAGE:   return ble_handle_stage(data, len);
-        case BLE_CMD_CONFIRM: return ble_handle_confirm(data, len);
-        case BLE_CMD_CANCEL:  return ble_handle_cancel(data, len);
-        case BLE_CMD_TICK:    return ble_handle_tick(data, len);
-        case BLE_CMD_CONTROLLER_ADD: return ble_handle_controller_add(data, len);
-        case BLE_CMD_CONTROLLER_REVOKE: return ble_handle_controller_revoke(data, len);
-        case BLE_CMD_SET_RADIO: return ble_handle_set_radio(data, len);
-        case BLE_CMD_CLEAR_RADIO: return ble_handle_clear_radio();
-        default: return BRIDGE_ERR_ARGUMENT;
+        case BLE_CMD_STAGE:   status = ble_handle_stage(data, len); break;
+        case BLE_CMD_CONFIRM: status = ble_handle_confirm(data, len); break;
+        case BLE_CMD_CANCEL:  status = ble_handle_cancel(data, len); break;
+        case BLE_CMD_TICK:    status = ble_handle_tick(data, len); break;
+        case BLE_CMD_CONTROLLER_ADD: status = ble_handle_controller_add(data, len); break;
+        case BLE_CMD_CONTROLLER_REVOKE: status = ble_handle_controller_revoke(data, len); break;
+        case BLE_CMD_SET_RADIO: status = ble_handle_set_radio(data, len); break;
+        case BLE_CMD_CLEAR_RADIO: status = ble_handle_clear_radio(); break;
+        default: cmd_ack_status = BRIDGE_ERR_ARGUMENT; return false;
+    }
+    cmd_ack_status = (uint8_t)status;
+    return true;
+}
+
+/* Transport-agnostic command core: one complete frame (cmd byte first) in,
+ * optional response out. Response kinds: BLE_CMD_NOISE || 53-byte handshake
+ * response, or BLE_CMD_ENCRYPTED || encrypted receipt. *resp_len == 0 means
+ * no response (also for all unauthenticated/plaintext frames). Shared by the
+ * BLE characteristic and the TCP endpoint; noise_ik state is global, so a
+ * fresh handshake on either transport takes over the session (documented in
+ * net_endpoint.h). */
+#define BRIDGE_TRANSPORT_RESPONSE_MAX (1u + NOISE_IK_RESPONSE_LEN)
+
+void command_process_frame(const uint8_t *data, uint16_t len,
+                           uint8_t *resp, uint16_t resp_cap,
+                           uint16_t *resp_len) {
+    *resp_len = 0;
+    if (len == 0) return;
+    switch (data[0]) {
+        case BLE_CMD_NOISE: {
+            if (len != (uint16_t)(1u + NOISE_IK_INIT_MESSAGE_LEN)) return;
+            size_t hs_len = 0;
+            if (noise_ik_handshake_respond(data + 1, NOISE_IK_INIT_MESSAGE_LEN,
+                                           resp + 1, (size_t)resp_cap - 1u,
+                                           &hs_len) != 0 ||
+                hs_len != NOISE_IK_RESPONSE_LEN) return;
+            resp[0] = BLE_CMD_NOISE;
+            *resp_len = (uint16_t)(1u + hs_len);
+            return;
+        }
+        case BLE_CMD_ENCRYPTED: {
+            uint8_t plaintext[NOISE_IK_MAX_PLAINTEXT];
+            size_t plaintext_len = 0;
+            if (len <= 1u || noise_decrypt_packet(data + 1, len - 1u,
+                                                  plaintext, sizeof(plaintext),
+                                                  &plaintext_len) != 0) return;
+            if (!ble_handle_authenticated_command(plaintext, (uint16_t)plaintext_len)) return;
+            size_t receipt_len = 0;
+            if (noise_encrypt_transport_ack(cmd_ack_status, resp + 1,
+                                            (size_t)resp_cap - 1u, &receipt_len) != 0) return;
+            resp[0] = BLE_CMD_ENCRYPTED;
+            *resp_len = (uint16_t)(1u + receipt_len);
+            return;
+        }
+        /* Never pass plaintext command frames from any unauthenticated link. */
+        default:
+            return;
     }
 }
 
 static void ble_handle_command(const uint8_t *data, uint16_t len) {
-    if (len == 0) return;
-    switch (data[0]) {
-        case BLE_CMD_NOISE:
-            ble_handle_noise(data, len);
-            return;
-        case BLE_CMD_ENCRYPTED: {
-            uint8_t plaintext[NOISE_IK_MAX_PLAINTEXT];
-            size_t plaintext_len = 0;
-            size_t receipt_len = 0;
-            cmd_char_read_valid = false;
-            cmd_char_read_len = 0;
-            if (len <= 1u || noise_decrypt_packet(data + 1, len - 1u,
-                                                   plaintext, sizeof(plaintext),
-                                                   &plaintext_len) != 0) return;
-            bridge_status_t command_status = ble_handle_authenticated_command(
-                plaintext, (uint16_t)plaintext_len);
-            cmd_char_read_data[0] = BLE_CMD_ENCRYPTED;
-            if (noise_encrypt_transport_ack((uint8_t)command_status,
-                                            cmd_char_read_data + 1,
-                                            sizeof(cmd_char_read_data) - 1u,
-                                            &receipt_len) != 0) return;
-            cmd_char_read_len = (uint16_t)(1u + receipt_len);
-            cmd_char_read_valid = true;
-            return;
-        }
-        /* Never pass plaintext command frames from the unauthenticated BLE link. */
-        case BLE_CMD_STAGE:
-        case BLE_CMD_CONFIRM:
-        case BLE_CMD_CANCEL:
-        case BLE_CMD_TICK:
-        default:
-            return;
-    }
+    uint8_t resp[BRIDGE_TRANSPORT_RESPONSE_MAX];
+    uint16_t resp_len = 0;
+    cmd_char_read_valid = false;
+    cmd_char_read_len = 0;
+    command_process_frame(data, len, resp, sizeof(resp), &resp_len);
+    if (resp_len == 0) return;
+    /* Existing BLE wire format: the handshake response is returned WITHOUT
+     * its type byte; the receipt keeps the CMD_ENCRYPTED prefix. */
+    uint16_t off = (resp[0] == BLE_CMD_NOISE) ? 1u : 0u;
+    uint16_t n = (uint16_t)(resp_len - off);
+    if (n > sizeof(cmd_char_read_data)) return;
+    memcpy(cmd_char_read_data, resp + off, n);
+    cmd_char_read_len = n;
+    cmd_char_read_valid = true;
 }
 
 /* Fragment protocol for BLE write-without-response (MTU = 20 bytes):
@@ -539,6 +563,11 @@ int main(void) {
         ble_setup();
     }
 
+#ifdef BRIDGE_ENABLE_NET
+    /* Wi-Fi endpoint: only active with a valid radio record (fail closed) */
+    if (cyw43_ok) net_endpoint_start();
+#endif
+
     /* Watchdog: 30s timeout (BLE needs time to initialize) */
     watchdog_enable(30000, true);
 
@@ -566,6 +595,9 @@ int main(void) {
         if (cyw43_ok) {
             async_context_poll(cyw43_arch_async_context());
             ble_readvertise_poll(usb_now_ms);
+#ifdef BRIDGE_ENABLE_NET
+            net_endpoint_poll(usb_now_ms);
+#endif
         }
 
         /* LED indicator */
