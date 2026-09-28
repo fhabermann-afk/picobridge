@@ -53,7 +53,7 @@ static struct tcp_pcb *net_listener;
 static struct tcp_pcb *net_session_pcb;
 static uint8_t net_rx[NET_FRAME_MAX_];
 static uint32_t net_rx_len;
-static uint8_t net_pending_tx[1u + NOISE_IK_RESPONSE_LEN];
+static uint8_t net_pending_tx[4u + 1u + NOISE_IK_RESPONSE_LEN];
 static uint32_t net_pending_tx_len;
 
 static void net_reset_frame(void) {
@@ -93,7 +93,9 @@ static err_t net_sent_cb(void *arg, struct tcp_pcb *pcb, uint16_t len) {
 static void net_process_frame(struct tcp_pcb *pcb) {
     uint8_t resp[1u + NOISE_IK_RESPONSE_LEN];
     uint16_t resp_len = 0;
-    command_process_frame(net_rx, (uint16_t)net_rx_len, resp, sizeof(resp), &resp_len);
+    /* net_rx[0..3] is the length prefix — the command byte starts at +4. */
+    command_process_frame(net_rx + 4u, (uint16_t)(net_rx_len - 4u),
+                          resp, sizeof(resp), &resp_len);
     net_rx_len = 0;
     if (resp_len == 0) return;
     if (net_pending_tx_len != 0) {
@@ -102,8 +104,13 @@ static void net_process_frame(struct tcp_pcb *pcb) {
         net_session_close(pcb);
         return;
     }
-    memcpy(net_pending_tx, resp, resp_len);
-    net_pending_tx_len = resp_len;
+    /* Socket framing: 4-byte BE length prefix, same as the receive path. */
+    net_pending_tx[0] = (uint8_t)(resp_len >> 24);
+    net_pending_tx[1] = (uint8_t)(resp_len >> 16);
+    net_pending_tx[2] = (uint8_t)(resp_len >> 8);
+    net_pending_tx[3] = (uint8_t)resp_len;
+    memcpy(net_pending_tx + 4u, resp, resp_len);
+    net_pending_tx_len = resp_len + 4u;
     (void)net_sent_cb(NULL, pcb, 0);
 }
 
@@ -126,7 +133,7 @@ static err_t net_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
                 if (net_rx_len == 4u) {
                     uint32_t flen = ((uint32_t)net_rx[0] << 24) | ((uint32_t)net_rx[1] << 16) |
                                     ((uint32_t)net_rx[2] << 8) | net_rx[3];
-                    if (flen == 0u || flen > NET_FRAME_MAX_) overflow = true;
+                    if (flen == 0u || flen > NET_FRAME_MAX_ - 4u) overflow = true;
                 }
             } else {
                 net_rx[net_rx_len++] = data[i];
@@ -216,7 +223,7 @@ uint16_t net_endpoint_raw(void) {
 }
 
 uint8_t net_endpoint_dhcp(void) {
-    struct netif *n = netif_find("w0");
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
     const struct dhcp *d;
     if (!n) return 0;
     d = netif_dhcp_data(n);
@@ -235,7 +242,7 @@ void net_endpoint_poll(uint32_t now_ms) {
     bool have_ip = false;
     async_context_t *ctx = cyw43_arch_async_context();
     async_context_acquire_lock_blocking(ctx);
-    struct netif *n = netif_find("w0");
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
     if (n) have_ip = netif_is_up(n) && !ip4_addr_isany_val(*netif_ip4_addr(n));
     async_context_release_lock(ctx);
 
@@ -314,4 +321,68 @@ void net_endpoint_poll(uint32_t now_ms) {
     }
 }
 
+static volatile uint16_t net_scan_total;
+static volatile uint16_t net_scan_match;
+static volatile int16_t net_scan_best_rssi;
+static char net_scan_ssid[33];
+
+static int net_scan_result_cb(void *env, const cyw43_ev_scan_result_t *r) {
+    (void)env;
+    if (net_scan_total < 0xFFFFu) net_scan_total++;
+    if (r->ssid_len <= 32u && r->ssid_len == strlen(net_scan_ssid) &&
+        memcmp(r->ssid, net_scan_ssid, r->ssid_len) == 0) {
+        if (net_scan_match < 0xFFFFu) net_scan_match++;
+        if (net_scan_best_rssi == 0 || r->rssi > net_scan_best_rssi)
+            net_scan_best_rssi = r->rssi;
+    }
+    return 0;  /* keep delivering results */
+}
+
+bool net_endpoint_scan_start(void) {
+    struct radio_config cfg;
+    cyw43_wifi_scan_options_t opts;
+    if (cyw43_wifi_scan_active(&cyw43_state)) return false;
+    if (!radio_provision_flash_read(&cfg)) return false;
+    strncpy(net_scan_ssid, cfg.ssid, sizeof(net_scan_ssid) - 1);
+    net_scan_ssid[sizeof(net_scan_ssid) - 1] = '\0';
+    memset(&cfg, 0, sizeof(cfg));
+    memset(&opts, 0, sizeof(opts));
+    net_scan_total = 0;
+    net_scan_match = 0;
+    net_scan_best_rssi = 0;
+    return cyw43_wifi_scan(&cyw43_state, &opts, NULL, net_scan_result_cb) == 0;
+}
+
+uint8_t net_endpoint_scan_total(void) {
+    return net_scan_total > 254u ? 255u : (uint8_t)net_scan_total;
+}
+uint8_t net_endpoint_scan_match(void) {
+    return net_scan_match > 254u ? 255u : (uint8_t)net_scan_match;
+}
+int8_t net_endpoint_scan_rssi(void) { return net_scan_best_rssi; }
+
 #endif /* BRIDGE_ENABLE_NET */
+
+uint8_t net_endpoint_ip_octet(uint8_t index) {
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
+    if (index > 3) return 0;
+    return (uint8_t)(ip4_addr_get_u32(netif_ip4_addr(n)) >> (24 - 8 * index));
+}
+
+uint8_t net_endpoint_probe(void) {
+    /* driver-internal bit, mirrors cyw43_ctrl.c */
+    #define JOIN_ACTIVE 0x0001u
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
+    uint8_t b = 0;
+    const uint8_t sta_bit = 1u << CYW43_ITF_STA;
+    if (n) {
+        b |= 1u;
+        if (netif_is_up(n)) b |= 2u;
+        if (netif_dhcp_data(n)) b |= 4u;
+    }
+    if (cyw43_state.wifi_join_state & JOIN_ACTIVE) b |= 8u;
+    if (cyw43_state.itf_state & sta_bit) b |= 16u;
+    if (n && !ip4_addr_isany_val(*netif_ip4_addr(n))) b |= 32u;
+    if (cyw43_is_initialized(&cyw43_state)) b |= 128u;
+    return b;
+}

@@ -70,9 +70,9 @@ class NoiseTcpSession:
         init = self.noise.begin_handshake()
         self._send_frame(bytes([self.ctl.CMD_NOISE]) + init)
         response = self._recv_frame()
-        if len(response) != 53:
-            raise ConnectionError(f"unexpected handshake response length {len(response)}")
-        self.noise.complete_handshake(response)
+        if len(response) != 1 + 53 or response[0] != self.ctl.CMD_NOISE:
+            raise ConnectionError(f"unexpected handshake response {len(response)}B")
+        self.noise.complete_handshake(response[1:])
 
     def command(self, plaintext: bytes) -> int:
         """Send an authenticated command; return the device receipt status."""

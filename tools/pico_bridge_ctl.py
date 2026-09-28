@@ -65,6 +65,12 @@ CMD_NET_STATUS = 11
 CMD_NET_DEBUG = 12
 CMD_NET_RAW = 13
 CMD_NET_DHCP = 14
+CMD_NET_PROBE = 15
+CMD_NET_IP = 16
+CMD_NET_SCAN_START = 17
+CMD_NET_SCAN_TOTAL = 18
+CMD_NET_SCAN_MATCH = 19
+CMD_NET_SCAN_RSSI = 20
 
 # Bridge modes (must match bridge_core.h)
 BRIDGE_LAYOUT_US = 1
@@ -672,6 +678,82 @@ async def cmd_net_debug(args):
               2: "INIT (waehlt AP)", 3: "BOUND (IP da!)",
               6: "SELECTING (keine OFFERs!)", 5: "RENEWING"}
         LOG.info("DHCP: %s", dn.get(dhcp, "?"))
+
+        packet = noise.encrypt_packet(bytes([CMD_NET_PROBE]))
+        await _write_fragments(client, packet)
+        probe = None
+        for _ in range(5):
+            try:
+                receipt = bytes(await asyncio.wait_for(
+                    client.read_gatt_char(COMMAND_CHAR_UUID), 3))
+                probe = decode_receipt_status_raw(noise, receipt)
+                break
+            except (asyncio.TimeoutError, NoiseHandshakeError):
+                continue
+        bits = []
+        for bit, name in ((1, "netif"), (2, "netif_up"), (4, "dhcp_struct"),
+                          (8, "join_active"), (16, "sta_itf"),
+                          (32, "ipv4"), (128, "cyw43_init")):
+            if probe is not None and probe & bit:
+                bits.append(name)
+        LOG.info("PROBE 0x%02x: %s", probe, "+".join(bits) or "keine")
+
+        octets = []
+        for idx in range(4):
+            packet = noise.encrypt_packet(bytes([CMD_NET_IP, idx]))
+            await _write_fragments(client, packet)
+            v = None
+            for _ in range(5):
+                try:
+                    receipt = bytes(await asyncio.wait_for(
+                        client.read_gatt_char(COMMAND_CHAR_UUID), 3))
+                    v = decode_receipt_status_raw(noise, receipt)
+                    break
+                except (asyncio.TimeoutError, NoiseHandshakeError):
+                    continue
+            octets.append(v)
+        if all(o is not None for o in octets):
+            LOG.info("Pico-IP: %d.%d.%d.%d", *octets)
+
+        def net_cmd(cmd_byte):
+            return noise.encrypt_packet(bytes([cmd_byte]))
+
+        packet = net_cmd(CMD_NET_SCAN_START)
+        await _write_fragments(client, packet)
+        try:
+            receipt = bytes(await asyncio.wait_for(
+                client.read_gatt_char(COMMAND_CHAR_UUID), 3))
+            started = decode_receipt_status_raw(noise, receipt)
+        except (asyncio.TimeoutError, NoiseHandshakeError):
+            started = 99
+        if started == 0:
+            LOG.info("Scan gestartet...")
+            await asyncio.sleep(15)
+        elif started == 99:
+            LOG.info("Scan: keine Antwort (lief evtl. schon)")
+        else:
+            LOG.info("Scan nicht gestartet (status %d)", started)
+        vals = {}
+        for name, byte in (("total", CMD_NET_SCAN_TOTAL),
+                           ("match", CMD_NET_SCAN_MATCH),
+                           ("rssi", CMD_NET_SCAN_RSSI)):
+            packet = net_cmd(byte)
+            await _write_fragments(client, packet)
+            v = None
+            for _ in range(5):
+                try:
+                    receipt = bytes(await asyncio.wait_for(
+                        client.read_gatt_char(COMMAND_CHAR_UUID), 3))
+                    v = decode_receipt_status_raw(noise, receipt)
+                    break
+                except (asyncio.TimeoutError, NoiseHandshakeError):
+                    continue
+            vals[name] = v
+        if vals.get("total") is not None:
+            rssi = vals["rssi"]
+            LOG.info("Scan: %d APs, %d x konfigurierte SSID, best RSSI %d dBm",
+                     vals["total"], vals["match"],
+                     rssi - 256 if rssi is not None and rssi > 127 else (rssi or 0))
     finally:
         await client.disconnect()
 

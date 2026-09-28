@@ -14,7 +14,7 @@
 #define LWIP_IPV6                       0
 #define LWIP_DHCP                       1
 #define LWIP_DNS                        0
-#define LWIP_ICMP                       0
+#define LWIP_ICMP                       1   /* pingability = diagnostics */
 #define LWIP_RAW                        0
 #define LWIP_UDP                        1   /* required by DHCP */
 #define LWIP_TCP                        1

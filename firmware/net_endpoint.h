@@ -45,4 +45,22 @@ uint16_t net_endpoint_raw(void);
 /* DHCP client state per cyw43 dhcp.c: 0=never started, 1=netif down, 2=discovering, 3=discovered(bound). */
 uint8_t net_endpoint_dhcp(void);
 
+/* Bitfield probe (diagnostics, net builds):
+ *  bit0 netif w0 exists, bit1 netif flags UP, bit2 dhcp struct present,
+ *  bit3 link ACTIVE, bit4 STA itf active, bit5 have IPv4,
+ *  bit6 dhcp_start_never_seen(=probe2), bit7 cyw43_is_initialized. */
+uint8_t net_endpoint_probe(void);
+
+/* Copies the assigned IPv4 as 4 raw octets (network order) into a 4-byte
+ * reply via the receipt path? No - receipts carry one byte. Instead expose
+ * it as four sequential single-byte reads through the NET_IP command. */
+uint8_t net_endpoint_ip_octet(uint8_t index);
+
+/* On-demand Wi-Fi scan through BLE diagnostics. start returns false when a
+ * scan is already running or no radio record exists. Counters reset per run. */
+bool net_endpoint_scan_start(void);
+uint8_t net_endpoint_scan_total(void);   /* APs seen, saturates at 255   */
+uint8_t net_endpoint_scan_match(void);   /* APs with configured SSID     */
+int8_t net_endpoint_scan_rssi(void);     /* best RSSI of matches, 0=none */
+
 #endif

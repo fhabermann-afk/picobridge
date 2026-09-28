@@ -53,6 +53,12 @@ extern void bridge_usb_set_identity(const char *serial, bool radio_ok);
                                  * (admin role, and only while no USB host is
                                  * mounted: provisioning happens at the bench) */
 #define BLE_CMD_CLEAR_RADIO 10u /* no payload; admin only */
+#define BLE_CMD_NET_SCAN_START 17u /* kick cyw43 scan; 0=started        */
+#define BLE_CMD_NET_SCAN_TOTAL 18u /* receipt = APs seen (<=255)          */
+#define BLE_CMD_NET_SCAN_MATCH 19u /* receipt = configured-SSID hits      */
+#define BLE_CMD_NET_SCAN_RSSI  20u /* receipt = best RSSI of hits (dBm)   */
+#define BLE_CMD_NET_IP     16u /* payload octet(1) -> receipt = that IPv4 octet */
+#define BLE_CMD_NET_PROBE  15u /* receipt status = netif/dhcp bitfield */
 #define BLE_CMD_NET_DHCP   14u /* receipt status = DHCP client state  */
 #define BLE_CMD_NET_RAW    13u /* receipt status = join_state bits 8-15   */
 #define BLE_CMD_NET_DEBUG  12u /* receipt status = 40 + cyw43 link status  */
@@ -288,6 +294,25 @@ static bool ble_handle_authenticated_command(const uint8_t *data, uint16_t len) 
         }
         case BLE_CMD_NET_DHCP:
             cmd_ack_status = net_endpoint_dhcp();
+            return true;
+        case BLE_CMD_NET_IP:
+            if (len != 2) { cmd_ack_status = BRIDGE_ERR_ARGUMENT; return false; }
+            cmd_ack_status = net_endpoint_ip_octet(data[1]);
+            return true;
+        case BLE_CMD_NET_SCAN_START:
+            cmd_ack_status = net_endpoint_scan_start() ? 0u : 1u;
+            return true;
+        case BLE_CMD_NET_SCAN_TOTAL:
+            cmd_ack_status = net_endpoint_scan_total();
+            return true;
+        case BLE_CMD_NET_SCAN_MATCH:
+            cmd_ack_status = net_endpoint_scan_match();
+            return true;
+        case BLE_CMD_NET_SCAN_RSSI:
+            cmd_ack_status = (uint8_t)net_endpoint_scan_rssi();
+            return true;
+        case BLE_CMD_NET_PROBE:
+            cmd_ack_status = net_endpoint_probe();
             return true;
 #endif
         default: cmd_ack_status = BRIDGE_ERR_ARGUMENT; return false;
