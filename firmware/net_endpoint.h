@@ -29,4 +29,20 @@ bool net_endpoint_start(void);
 void net_endpoint_poll(uint32_t now_ms);
 bool net_endpoint_wifi_up(void);
 
+/* Diagnostic for BLE NET_STATUS: 0=no record, 1=retry wait,
+ * 2=connecting (no ipv4 yet), 3=ready (listener armed). */
+uint8_t net_endpoint_state(void);
+
+/* Raw cyw43 link status (CYW43_LINK_*): 0 down, 1 join, 2 noip, 3 up,
+ * -1 fail, -2 nonet, -3 badauth. Signed! */
+int8_t net_endpoint_link(void);
+
+/* Raw driver join_state bits (diagnostics): bit0 active, 9 auth,
+ * 10 link, 11 keyed (0x0e01 = STA connected); kind nibble 2 fail,
+ * 3 nonet, 4 badauth. */
+uint16_t net_endpoint_raw(void);
+
+/* DHCP client state per cyw43 dhcp.c: 0=never started, 1=netif down, 2=discovering, 3=discovered(bound). */
+uint8_t net_endpoint_dhcp(void);
+
 #endif

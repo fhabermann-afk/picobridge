@@ -21,10 +21,13 @@
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
+#include "lwip/dhcp.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 
 #include "radio_provision_flash.h"
+#include "cyw43.h"
+#include "cyw43_internal.h"
 
 /* Provided by bridge_main.c (transport-agnostic command core). */
 void command_process_frame(const uint8_t *data, uint16_t len,
@@ -201,6 +204,27 @@ bool net_endpoint_wifi_up(void) {
     return net_state == NET_STATE_READY && net_listener_ok;
 }
 
+uint8_t net_endpoint_state(void) { return (uint8_t)net_state; }
+
+int8_t net_endpoint_link(void) {
+    if (net_state == NET_STATE_NO_RECORD) return 0;
+    return (int8_t)cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA);
+}
+
+uint16_t net_endpoint_raw(void) {
+    return (uint16_t)cyw43_state.wifi_join_state;
+}
+
+uint8_t net_endpoint_dhcp(void) {
+    struct netif *n = netif_find("w0");
+    const struct dhcp *d;
+    if (!n) return 0;
+    d = netif_dhcp_data(n);
+    if (!d) return 0;                    /* dhcp_start never ran */
+    if (!netif_is_up(n)) return 1;       /* netif down */
+    return d->state == 10 ? 3 : (uint8_t)d->state;  /* 10 = BOUND */
+}
+
 void net_endpoint_poll(uint32_t now_ms) {
     if (net_state == NET_STATE_NO_RECORD) return;
 
@@ -231,6 +255,10 @@ void net_endpoint_poll(uint32_t now_ms) {
                     net_state = NET_STATE_NO_RECORD;  /* radio cleared */
                     return;
                 }
+                /* cyw43_arch_init does NOT enable STA mode (SDK examples do
+                 * it explicitly); the join needs w0 up with lwIP/DHCP wired:
+                 * exactly what this call performs. Idempotent per retry. */
+                cyw43_arch_enable_sta_mode();
                 int r = cyw43_arch_wifi_connect_async(cfg.ssid, cfg.psk,
                                                       CYW43_AUTH_WPA2_AES_PSK);
                 memset(&cfg, 0, sizeof(cfg));
@@ -257,7 +285,11 @@ void net_endpoint_poll(uint32_t now_ms) {
                     return;
                 }
             }
-            if ((int32_t)(now_ms - net_retry_at_ms) >= 0) {
+            /* Timeout only while NOT associated: JOIN (link 1) means the
+             * 4-way/DHCP phase is still in flight — killing it there caused
+             * a flap loop that threw away leases seconds before they came. */
+            if ((int32_t)(now_ms - net_retry_at_ms) >= 0 &&
+                cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA) < CYW43_LINK_JOIN) {
                 cyw43_arch_disable_sta_mode();  /* drop association, retry fresh */
                 cyw43_arch_enable_sta_mode();
                 net_state = NET_STATE_RETRY_WAIT;

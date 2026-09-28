@@ -53,6 +53,12 @@ extern void bridge_usb_set_identity(const char *serial, bool radio_ok);
                                  * (admin role, and only while no USB host is
                                  * mounted: provisioning happens at the bench) */
 #define BLE_CMD_CLEAR_RADIO 10u /* no payload; admin only */
+#define BLE_CMD_NET_DHCP   14u /* receipt status = DHCP client state  */
+#define BLE_CMD_NET_RAW    13u /* receipt status = join_state bits 8-15   */
+#define BLE_CMD_NET_DEBUG  12u /* receipt status = 40 + cyw43 link status  */
+#define BLE_CMD_NET_STATUS  11u /* no payload; operator+; reply = state byte via receipt path disabled: uses plaintext READ-free design.
+                                 * Handled specially: replies via cmd_char_read as ENCRYPTED receipt whose
+                                 * status byte IS the net state (0..3). */
 
 #define BRIDGE_TTL_MS     BRIDGE_MAX_TTL_MS
 
@@ -263,6 +269,27 @@ static bool ble_handle_authenticated_command(const uint8_t *data, uint16_t len) 
         case BLE_CMD_CONTROLLER_REVOKE: status = ble_handle_controller_revoke(data, len); break;
         case BLE_CMD_SET_RADIO: status = ble_handle_set_radio(data, len); break;
         case BLE_CMD_CLEAR_RADIO: status = ble_handle_clear_radio(); break;
+#ifdef BRIDGE_ENABLE_NET
+        case BLE_CMD_NET_STATUS:
+            /* Receipt status byte doubles as the network state (0..3).
+             * Non-secret; authenticated transport only. */
+            cmd_ack_status = net_endpoint_state();
+            return true;
+        case BLE_CMD_NET_DEBUG:
+            /* link offset by 40 keeps the byte outside bridge_status_t */
+            cmd_ack_status = (uint8_t)(40 + net_endpoint_link());
+            return true;
+        case BLE_CMD_NET_RAW: {
+            /* join_state flags live in bits 8-11: active|auth|link|keyed
+             * = 0x0f pattern after >>8 (kind nibble dropped, see NET_DEBUG
+             * for the failure kind). */
+            cmd_ack_status = (uint8_t)(net_endpoint_raw() >> 8);
+            return true;
+        }
+        case BLE_CMD_NET_DHCP:
+            cmd_ack_status = net_endpoint_dhcp();
+            return true;
+#endif
         default: cmd_ack_status = BRIDGE_ERR_ARGUMENT; return false;
     }
     cmd_ack_status = (uint8_t)status;

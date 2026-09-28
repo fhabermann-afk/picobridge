@@ -61,6 +61,10 @@ CMD_CONTROLLER_ADD = 7
 CMD_CONTROLLER_REVOKE = 8
 CMD_SET_RADIO = 9
 CMD_CLEAR_RADIO = 10
+CMD_NET_STATUS = 11
+CMD_NET_DEBUG = 12
+CMD_NET_RAW = 13
+CMD_NET_DHCP = 14
 
 # Bridge modes (must match bridge_core.h)
 BRIDGE_LAYOUT_US = 1
@@ -361,6 +365,14 @@ async def send_command(client, packet, expect_response=False, noise=None):
         packet = noise.encrypt_packet(packet)
         LOG.debug("Encrypted packet: %d bytes", len(packet))
     LOG.debug("Sending %d bytes: %s", len(packet), packet.hex())
+    await _write_fragments(client, packet)
+    if noise and noise.is_ready():
+        noise.verify_transport_ack(await client.read_gatt_char(COMMAND_CHAR_UUID))
+    elif expect_response:
+        await asyncio.sleep(0.05)
+
+
+async def _write_fragments(client, packet):
     fragments = fragment_packet(packet)
     for i, frag in enumerate(fragments):
         LOG.debug("Fragment %d/%d (%d bytes)", i + 1, len(fragments), len(frag))
@@ -369,12 +381,8 @@ async def send_command(client, packet, expect_response=False, noise=None):
         except Exception:
             await client.write_gatt_char(COMMAND_CHAR_UUID, frag, response=True)
         # Small delay between fragments to avoid flooding
-        if expect_response or len(fragments) > 1:
+        if len(fragments) > 1:
             await asyncio.sleep(0.01)
-    if noise and noise.is_ready():
-        noise.verify_transport_ack(await client.read_gatt_char(COMMAND_CHAR_UUID))
-    elif expect_response:
-        await asyncio.sleep(0.05)
 
 
 async def perform_noise_handshake(client, identity_path) -> NoiseIKInitiator:
@@ -597,6 +605,98 @@ async def cmd_clear_radio(args):
         await client.disconnect()
 
 
+def decode_receipt_status_raw(noise, receipt):
+    """Verify an encrypted receipt and return its status byte WITHOUT
+    raising on nonzero status (for diagnostic commands like NET_STATUS)."""
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+    if not noise.is_ready() or len(receipt) != 1 + 8 + len(TRANSPORT_ACK) + 1 + 16 or receipt[0] != CMD_ENCRYPTED:
+        raise NoiseHandshakeError("missing encrypted device receipt")
+    nonce = int.from_bytes(receipt[1:9], "little")
+    if nonce != noise._receive_nonce:
+        raise NoiseHandshakeError("unexpected device receipt nonce")
+    try:
+        plaintext = ChaCha20Poly1305(noise._receive_key).decrypt(
+            noise._noise_nonce(nonce), receipt[9:], None)
+    except InvalidTag as exc:
+        raise NoiseHandshakeError("invalid encrypted device receipt") from exc
+    noise._receive_nonce += 1
+    if len(plaintext) != len(TRANSPORT_ACK) + 1 or plaintext[:len(TRANSPORT_ACK)] != TRANSPORT_ACK:
+        raise NoiseHandshakeError("unexpected encrypted device receipt")
+    return plaintext[-1]
+
+
+async def cmd_net_debug(args):
+    """Raw cyw43 link status: receipt status = 40 + CYW43_LINK_*."""
+    device, client = await scan_and_connect(args.timeout)
+    try:
+        noise = await perform_noise_handshake(client, args.noise_identity)
+        packet = noise.encrypt_packet(bytes([CMD_NET_DEBUG]))
+        await _write_fragments(client, packet)
+        receipt = bytes(await client.read_gatt_char(COMMAND_CHAR_UUID))
+        status = decode_receipt_status_raw(noise, receipt)
+        link = status - 40
+        names = {0: "down", 1: "join", 2: "noip", 3: "UP",
+                 -1: "fail", -2: "nonet(SSID?)", -3: "badauth"}
+        LOG.info("cyw43 link %d: %s [authenticated]", link, names.get(link, "?"))
+        packet = noise.encrypt_packet(bytes([CMD_NET_RAW]))
+        await _write_fragments(client, packet)
+        raw8 = None
+        for _ in range(5):
+            try:
+                receipt = bytes(await asyncio.wait_for(
+                    client.read_gatt_char(COMMAND_CHAR_UUID), 3))
+                raw8 = decode_receipt_status_raw(noise, receipt)
+                break
+            except (asyncio.TimeoutError, NoiseHandshakeError):
+                continue
+        flags = []
+        if raw8 & 0x01: flags.append("active")
+        if raw8 & 0x02: flags.append("auth")
+        if raw8 & 0x04: flags.append("link")
+        if raw8 & 0x08: flags.append("keyed")
+        LOG.info("join flags 0x%02x: %s (0x0f komplett)", raw8, "+".join(flags) or "keine")
+
+        packet = noise.encrypt_packet(bytes([CMD_NET_DHCP]))
+        await _write_fragments(client, packet)
+        dhcp = None
+        for _ in range(5):
+            try:
+                receipt = bytes(await asyncio.wait_for(
+                    client.read_gatt_char(COMMAND_CHAR_UUID), 3))
+                dhcp = decode_receipt_status_raw(noise, receipt)
+                break
+            except (asyncio.TimeoutError, NoiseHandshakeError):
+                continue
+        dn = {0: "dhcp_start nie gelaufen", 1: "netif down",
+              2: "INIT (waehlt AP)", 3: "BOUND (IP da!)",
+              6: "SELECTING (keine OFFERs!)", 5: "RENEWING"}
+        LOG.info("DHCP: %s", dn.get(dhcp, "?"))
+    finally:
+        await client.disconnect()
+
+
+async def cmd_net_status(args):
+    """Report the Wi-Fi endpoint state (net builds only).
+
+    The device answers with an authenticated receipt whose status byte is
+    the network state: 0=no radio record, 1=waiting for retry window,
+    2=associating/no IPv4 yet, 3=ready (TCP :44901 listening).
+    """
+    device, client = await scan_and_connect(args.timeout)
+    try:
+        noise = await perform_noise_handshake(client, args.noise_identity)
+        packet = noise.encrypt_packet(bytes([CMD_NET_STATUS]))
+        await _write_fragments(client, packet)
+        receipt = bytes(await client.read_gatt_char(COMMAND_CHAR_UUID))
+        status = decode_receipt_status_raw(noise, receipt)
+        names = {0: "kein Radiodatensatz", 1: "Wiederholungsfenster",
+                 2: "verbinde (kein IPv4)", 3: "BEREIT (TCP :44901)"}
+        LOG.info("NET state %d: %s [authenticated]", status, names.get(status, "unbekannt"))
+    finally:
+        await client.disconnect()
+
+
 def add_noise_identity_argument(command):
     command.add_argument(
         "--noise-identity", type=Path,
@@ -678,6 +778,16 @@ def main():
     clear_radio.add_argument("--timeout", type=int, default=10)
     add_noise_identity_argument(clear_radio)
     clear_radio.set_defaults(func=cmd_clear_radio)
+
+    net_status = sub.add_parser("net-status", help="Wi-Fi endpoint state (net builds)")
+    net_status.add_argument("--timeout", type=int, default=10)
+    add_noise_identity_argument(net_status)
+    net_status.set_defaults(func=cmd_net_status)
+
+    net_debug = sub.add_parser("net-debug", help="Raw cyw43 link status (net builds)")
+    net_debug.add_argument("--timeout", type=int, default=10)
+    add_noise_identity_argument(net_debug)
+    net_debug.set_defaults(func=cmd_net_debug)
 
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
