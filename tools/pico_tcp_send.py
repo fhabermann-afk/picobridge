@@ -12,6 +12,7 @@ All cryptography is delegated to NoiseIKInitiator from pico_bridge_ctl.py —
 this module is framing only, so both transports cannot drift apart.
 """
 import argparse
+import time
 import asyncio
 import getpass
 import importlib.util
@@ -21,6 +22,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+BRIDGE_ERR_BUSY = 4  # bridge_core: previous command still typing
 CTL_PATH = HERE / "pico_bridge_ctl.py"
 DEFAULT_PORT = 44901
 
@@ -97,6 +99,27 @@ class NoiseTcpSession:
         self.close()
 
 
+def stage_and_confirm(session, ctl, packet, confirm, label,
+                      busy_deadline_s=20.0):
+    """Stage, then confirm. A long password is still being typed when the
+    next stage arrives: the device answers BUSY (status=4) until the
+    previous execution drains, so retry until idle instead of failing."""
+    deadline = time.monotonic() + busy_deadline_s
+    while True:
+        try:
+            session.command(packet)
+            break
+        except ctl.NoiseHandshakeError as exc:
+            # verify_transport_ack raises on every non-zero status; only
+            # BRIDGE_ERR_BUSY (device still typing) is retryable.
+            if "status=4" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+    status = session.command(confirm)
+    if status != 0:
+        raise SystemExit(f"{label}-confirm abgelehnt (status={status})")
+
+
 def resolve_identity(explicit: str | None) -> str:
     if explicit:
         return explicit
@@ -154,29 +177,19 @@ async def amain():
             print(f"Noise IK handshake OK — {host}:{port} authentifiziert")
             if args.delay > 0:
                 print(f"{args.delay}s Countdown...", file=sys.stderr)
-                time = __import__("time")
                 time.sleep(args.delay)
             cmd_id = secrets.randbelow(0xFFFFFFFE) + 1
-            status = s.command(ctl.build_stage_packet(owner, cmd_id, layout, mode, 0, raw))
-            if status != 0:
-                raise SystemExit(f"stage abgelehnt (status={status})")
-            status = s.command(ctl.build_confirm_packet(owner, cmd_id))
-            if status != 0:
-                raise SystemExit(f"confirm abgelehnt (status={status})")
+            stage_and_confirm(
+                s, ctl, ctl.build_stage_packet(owner, cmd_id, layout, mode, 0, raw),
+                ctl.build_confirm_packet(owner, cmd_id), "stage")
             print(f"OK: {len(raw)} Zeichen gesendet.")
             if args.enter:
-                time = __import__("time")
-                time.sleep(0.15)
                 enter_id = secrets.randbelow(0xFFFFFFFE) + 1
                 enter = ctl.build_stage_packet(
                     owner, enter_id, layout, ctl.BRIDGE_MODE_TEXT,
                     ctl.BRIDGE_FLAG_ALLOW_LF, b"\n")
-                status = s.command(enter)
-                if status != 0:
-                    raise SystemExit(f"enter-stage abgelehnt (status={status})")
-                status = s.command(ctl.build_confirm_packet(owner, enter_id))
-                if status != 0:
-                    raise SystemExit(f"enter-confirm abgelehnt (status={status})")
+                stage_and_confirm(
+                    s, ctl, enter, ctl.build_confirm_packet(owner, enter_id), "Enter")
                 print("OK: Enter gesendet.")
 
     await asyncio.get_running_loop().run_in_executor(None, exchange)

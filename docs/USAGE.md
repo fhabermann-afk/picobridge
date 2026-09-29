@@ -42,6 +42,42 @@ Behaviour that matters:
   `sudo` against a user-owned identity fails by design. Give yourself an ACL
   on the event node instead when you need to capture events while sending.
 
+## Over the network: `tools/pico_tcp_send.py`
+
+Firmware builds with Wi-Fi support (`pico_bridge_net`) expose the **same
+command protocol** the BLE characteristic speaks — Noise IK handshake,
+encrypted frames, encrypted receipts — on TCP port **44901**. The transport
+changes; the trust model does not: without an enrolled controller identity
+the device answers no handshake, and nothing is ever accepted in plaintext.
+
+```bash
+# visible test text (never use -t for secrets):
+python3 tools/pico_tcp_send.py <pico-ip> -t "hello" --mode text
+
+# a secret, hidden prompt:
+python3 tools/pico_tcp_send.py <pico-ip> --mode password
+
+# straight from the clipboard without ever printing it (fish/bash):
+wl-paste --no-newline | python3 tools/pico_tcp_send.py <pico-ip> \
+    --mode password --stdin          # Wayland
+xclip -selection clipboard -o | ...  # X11 (xsel works too)
+```
+
+The device keeps the same fail-closed rules on TCP as over BLE, plus one
+documented session rule: the Noise session state is global, so a fresh
+handshake from *any* transport takes over. On the unauthenticated socket
+that is a bounded nuisance (a LAN attacker can reset sessions, never
+forge or read them); connect and send in one invocation.
+
+Finding the IP after each reboot: the router's DHCP table shows hostname
+`picobridge`; or ask the device over BLE, which works even with Wi-Fi
+broken:
+
+```bash
+python3 tools/pico_bridge_ctl.py net-debug   # link state, DHCP phase, IP, scan
+python3 tools/pico_bridge_ctl.py net-status  # 0=no radio record .. 3=ready
+```
+
 ## Low-level CLI: `tools/pico_bridge_ctl.py`
 
 Everything the device speaks, one subcommand per protocol operation:

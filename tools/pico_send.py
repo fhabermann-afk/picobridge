@@ -218,7 +218,7 @@ async def run(args):
 
         cmd_id = secrets.randbelow(0xFFFFFFFE) + 1
         packet = ctl.build_stage_packet(owner, cmd_id, layout, mode, 0, raw)
-        await ctl.send_command(client, packet, noise=noise)
+        await ctl.send_stage_until_idle(client, packet, noise)
         await ctl.send_command(client, ctl.build_confirm_packet(owner, cmd_id), noise=noise)
         print(f"OK: {len(raw)} Zeichen gesendet ({'Passwort' if mode == ctl.BRIDGE_MODE_PASSWORD else 'Text'}-Modus).")
 
@@ -227,7 +227,7 @@ async def run(args):
             enter_id = secrets.randbelow(0xFFFFFFFE) + 1
             enter_packet = ctl.build_stage_packet(
                 owner, enter_id, layout, ctl.BRIDGE_MODE_TEXT, ctl.BRIDGE_FLAG_ALLOW_LF, b"\n")
-            await ctl.send_command(client, enter_packet, noise=noise)
+            await ctl.send_stage_until_idle(client, enter_packet, noise)
             await ctl.send_command(client, ctl.build_confirm_packet(owner, enter_id), noise=noise)
             print("OK: Enter gesendet.")
     finally:

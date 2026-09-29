@@ -1,18 +1,19 @@
 # PicoBridge
 
-A Raspberry Pi **Pico 2 W** that turns Bluetooth Low Energy commands into
-USB-HID keystrokes on the machine it is plugged into — with end-to-end Noise
-IK encryption and a strict, fail-closed design.
+A Raspberry Pi **Pico 2 W** that turns Bluetooth Low Energy — or, in the
+`pico_bridge_net` build, Wi-Fi TCP — commands into USB-HID keystrokes on the
+machine it is plugged into — with end-to-end Noise IK encryption and a
+strict, fail-closed design.
 
 Use it to type a password or any other string into the focused window of the
 host the Pico is attached to, without the secret ever touching that host's
-clipboard, keystroke injectors, or network. The controller (a normal laptop or
-phone with BLE) authenticates to the Pico over Noise `IK` and the Pico
-*types*, exactly like a hardware keyboard would.
+clipboard, keystroke injectors, or network. The controller (a normal laptop
+or phone) authenticates to the Pico over Noise `IK` and the Pico *types*,
+exactly like a hardware keyboard would.
 
 ```
-controller (BLE, Noise IK)            Pico 2 W                 target host
-  pico-send  ────────────────────▶  bridge_core  ──USB HID──▶  focused window
+controller (BLE or Wi-Fi TCP, Noise IK)     Pico 2 W            target host
+  pico-send / pico_tcp_send  ───────────▶  bridge_core  ──USB HID──▶  focused window
 ```
 
 **Why:** clipboard managers, `xdotool`, browser extension “autofill”, and

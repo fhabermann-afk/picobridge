@@ -57,7 +57,18 @@ cp <enrollment-dir>/noise_ik_keys.h firmware/noise_ik_keys.h   # mode 0600, neve
 cmake --preset pico2w-test
 cmake --build --preset pico2w-test --target pico_bridge
 # artifact: build-pico2w-test/pico_bridge.uf2
+
+# Optional: build with the Wi-Fi network command endpoint as well
+cmake --build --preset pico2w-test --target pico_bridge_net
+# artifact: build-pico2w-test/pico_bridge_net.uf2
 ```
+
+Two firmware images are built from one tree: `pico_bridge` (BLE only, the
+rescue image — always keep a copy flashable) and `pico_bridge_net` (BLE plus
+a Wi-Fi station mode with the same command protocol on TCP port 44901).
+The net build needs the Wi-Fi record provisioned (`set-radio`, see
+PROVISIONING.md §5); without a valid record the radio stays off and no
+listener is created — fail closed.
 
 Native (host-compiler) unit tests, no hardware needed:
 

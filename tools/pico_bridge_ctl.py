@@ -378,6 +378,22 @@ async def send_command(client, packet, expect_response=False, noise=None):
         await asyncio.sleep(0.05)
 
 
+async def send_stage_until_idle(client, packet, noise, timeout_s=20.0):
+    """Stage a payload, retrying while the device is still typing a previous
+    command (BRIDGE_ERR_BUSY). Without this, a long password followed by the
+    Enter keystroke races the device's own typing speed and fails spuriously.
+    Raises on any other rejection."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            await send_command(client, packet, noise=noise)
+            return
+        except NoiseHandshakeError as exc:
+            if "status=4" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(0.1)
+
+
 async def _write_fragments(client, packet):
     fragments = fragment_packet(packet)
     for i, frag in enumerate(fragments):
