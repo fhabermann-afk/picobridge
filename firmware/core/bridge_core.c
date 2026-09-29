@@ -214,6 +214,11 @@ bridge_status_t bridge_core_confirm(bridge_core_t *core, uint32_t owner,
     return BRIDGE_OK;
 }
 
+bridge_state_t bridge_core_state(const bridge_core_t *core)
+{
+    return core == NULL ? BRIDGE_STATE_EMPTY : core->state;
+}
+
 bridge_status_t bridge_core_next(bridge_core_t *core, uint32_t now_ms,
                                 bridge_stroke_t *stroke)
 {

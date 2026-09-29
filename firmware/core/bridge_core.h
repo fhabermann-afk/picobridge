@@ -75,6 +75,8 @@ bridge_status_t bridge_core_confirm(bridge_core_t *core, uint32_t owner,
 bridge_status_t bridge_core_next(bridge_core_t *core, uint32_t now_ms,
                                 bridge_stroke_t *stroke);
 bridge_status_t bridge_core_tick(bridge_core_t *core, uint32_t now_ms);
+/* Current state (read-only accessor for transport recovery logic). */
+bridge_state_t bridge_core_state(const bridge_core_t *core);
 bridge_status_t bridge_core_cancel(bridge_core_t *core, uint32_t owner, uint32_t id);
 /* Trusted local abort on disconnect, USB failure, lock change, etc. */
 void bridge_core_abort(bridge_core_t *core);

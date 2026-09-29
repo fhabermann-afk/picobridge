@@ -133,13 +133,36 @@ bool tud_hid_set_idle_cb(uint8_t instance, uint8_t rate) {
 }
 
 void tud_mount_cb(void) { hid_idle_dirty = true; }
-void tud_umount_cb(void) { hid_idle_dirty = true; hid_leds = 0; }
-void tud_suspend_cb(bool remote_wakeup_en) { (void)remote_wakeup_en; hid_idle_dirty = true; }
+void tud_umount_cb(void) {
+    hid_idle_dirty = true; hid_leds = 0;
+    /* No host to receive the rest of a stroke queue: release the core so a
+     * replug (or the next command) starts clean instead of stuck BUSY. */
+    bridge_core_abort(&core);
+}
+void tud_suspend_cb(bool remote_wakeup_en) {
+    (void)remote_wakeup_en;
+    hid_idle_dirty = true;
+    bridge_core_abort(&core);
+}
 void tud_resume_cb(void) { hid_idle_dirty = true; }
 
 /* ---- USB HID output: drain bridge_core_next → keyboard report ---- */
 static void usb_hid_drain(void) {
     bridge_stroke_t stroke;
+    /* Stall guard: if the core stays EXECUTING with no endpoint progress
+     * (host accepted enumeration but not our reports), a later stage would
+     * fail BUSY forever until power cycle. Abort after a bounded stall. */
+    static uint32_t exec_since_ms;
+    if (bridge_core_state(&core) == BRIDGE_STATE_EXECUTING) {
+        if (exec_since_ms == 0) exec_since_ms = usb_now_ms;
+        else if ((uint32_t)(usb_now_ms - exec_since_ms) > 2000u) {
+            bridge_core_abort(&core);
+            exec_since_ms = 0;
+            return;
+        }
+    } else {
+        exec_since_ms = 0;
+    }
     while (tud_hid_ready()) {
         bridge_status_t st = bridge_core_next(&core, usb_now_ms, &stroke);
         if (st != BRIDGE_OK) break;
