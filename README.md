@@ -22,6 +22,8 @@ may not trust on that machine. A USB keyboard is a peripheral the target OS
 has to trust anyway — and PicoBridge only ever *types*, through a channel
 that is mutually authenticated and encrypted before a single keystroke.
 
+
+> **Controller rollout:** [docs/CLIENT-SETUP.md](docs/CLIENT-SETUP.md) covers the Python venv, Noise identity, clipboard use, firmware flashing, and first TCP/BLE commands.
 ## Status
 
 Working prototype, in daily use by its author. Tested against Linux targets.
