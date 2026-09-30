@@ -58,9 +58,8 @@ python3 tools/pico_tcp_send.py <pico-ip> -t "hello" --mode text
 python3 tools/pico_tcp_send.py <pico-ip> --mode password
 
 # straight from the clipboard without ever printing it (fish/bash):
-wl-paste --no-newline | python3 tools/pico_tcp_send.py <pico-ip> \
-    --mode password --stdin          # Wayland
-xclip -selection clipboard -o | ...  # X11 (xsel works too)
+python3 tools/pico_tcp_send.py <pico-ip> --clipboard --mode password
+# internally: wl-paste --no-newline (Wayland), xclip/xsel (X11)
 ```
 
 The device keeps the same fail-closed rules on TCP as over BLE, plus one

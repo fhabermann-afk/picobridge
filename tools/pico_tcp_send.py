@@ -16,8 +16,11 @@ import time
 import asyncio
 import getpass
 import importlib.util
+import os
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -99,6 +102,38 @@ class NoiseTcpSession:
         self.close()
 
 
+def clipboard_backend():
+    """Return the session's safe clipboard reader, or None.
+
+    Do not use a shell command: it would risk the secret being interpolated
+    into argv or shell diagnostics.  The password manager remains owner of
+    clearing the clipboard timeout.
+    """
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-paste"):
+        return ["wl-paste", "--no-newline"]
+    if os.environ.get("DISPLAY") or os.environ.get("XAUTHORITY"):
+        if shutil.which("xclip"):
+            return ["xclip", "-selection", "clipboard", "-o"]
+        if shutil.which("xsel"):
+            return ["xsel", "--clipboard", "--output"]
+    return None
+
+
+def clipboard_read():
+    cmd = clipboard_backend()
+    if cmd is None:
+        raise SystemExit(
+            "Kein Clipboard-Backend: wl-clipboard (Wayland) oder xclip/xsel "
+            "(X11) installieren und in der grafischen Sitzung ausführen.")
+    result = subprocess.run(cmd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        raise SystemExit("Clipboard-Lesen fehlgeschlagen: " +
+                         result.stderr.decode(errors="replace").strip())
+    # xclip/xsel commonly append LF; it is not part of a copied password.
+    return result.stdout.rstrip(b"\r\n")
+
+
 def stage_and_confirm(session, ctl, packet, confirm, label,
                       busy_deadline_s=20.0):
     """Stage, then confirm. A long password is still being typed when the
@@ -140,6 +175,8 @@ async def amain():
     parser.add_argument("target", help="host[:port] des Picos (Default-Port 44901)")
     parser.add_argument("-t", "--text", help="sichtbarer Text (KEIN Passwort)")
     parser.add_argument("--stdin", action="store_true", help="Secret von stdin lesen")
+    parser.add_argument("--clipboard", action="store_true",
+                        help="Secret aus der grafischen Zwischenablage lesen (wl-paste/xclip/xsel)")
     parser.add_argument("--mode", choices=["password", "text"], default="password")
     parser.add_argument("-d", "--delay", type=int, default=0,
                         help="Sekunden zwischen Connect und Stage (Default 0; "
@@ -155,8 +192,13 @@ async def amain():
     host, _, port_s = args.target.partition(":")
     port = int(port_s) if port_s else DEFAULT_PORT
 
-    if args.stdin:
-        raw = sys.stdin.buffer.read().rstrip(b"\n")
+    sources = sum((args.stdin, args.clipboard, args.text is not None))
+    if sources > 1:
+        raise SystemExit("Genau eine Quelle: --stdin, --clipboard oder --text.")
+    if args.clipboard:
+        raw = clipboard_read()
+    elif args.stdin:
+        raw = sys.stdin.buffer.read().rstrip(b"\r\n")
     elif args.text is not None:
         raw = args.text.encode("utf-8")
     else:
@@ -169,7 +211,7 @@ async def amain():
     mode = ctl.BRIDGE_MODE_TEXT if (args.text is not None or args.mode == "text") \
         else ctl.BRIDGE_MODE_PASSWORD
     layout = ctl.BRIDGE_LAYOUT_DE if args.layout == "de" else ctl.BRIDGE_LAYOUT_US
-    owner = __import__("os").geteuid()
+    owner = os.geteuid()
     identity = resolve_identity(args.identity)
 
     def exchange():
