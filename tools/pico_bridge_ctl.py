@@ -31,6 +31,15 @@ import stat
 from pathlib import Path
 
 try:
+    import pico_fleet
+except ImportError:  # executed as a path-loaded module (pico_tcp_send/pico_send)
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "pico_fleet", Path(__file__).resolve().parent / "pico_fleet.py")
+    pico_fleet = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(pico_fleet)
+
+try:
     from bleak import BleakClient
     from bleak.backends.device import BLEDevice
 except ImportError:
@@ -308,23 +317,39 @@ def build_cancel_packet(owner, cmd_id):
     return bytes(packet)
 
 
-async def scan_and_connect(timeout=10):
-    """Scan for nearby PicoBridge devices and connect to the first one."""
+async def scan_and_connect(timeout=10, selector=None):
+    """Scan for PicoBridge devices; with a selector, connect to exactly that one.
+
+    selector: None (any bridge; interactive pick when several), a 1-4 hex
+    fleet suffix, a full "PicoBridge-xxxx" name, or a MAC address.
+    """
     from bleak import BleakScanner
     LOG.info("Scanning for PicoBridge devices (timeout=%ds)...", timeout)
     devices = await BleakScanner.discover(timeout=timeout)
-    pico_devices = [d for d in devices if "PicoBridge" in (d.name or "")]
-    if not pico_devices:
+    bridges = [d for d in devices if "PicoBridge" in (d.name or "")]
+    if not bridges:
         LOG.error("No PicoBridge device found in range.")
         sys.exit(1)
-    if len(pico_devices) > 1:
+    if selector:
+        if pico_fleet.MAC_RE.fullmatch(selector):
+            picked = [d for d in bridges if d.address.upper() == selector.upper()]
+        else:
+            picked = [d for d in bridges if pico_fleet.ble_matches(d.name, selector)]
+        if not picked:
+            seen = ", ".join(sorted({d.name or "?" for d in bridges}))
+            LOG.error("Kein PicoBridge auf %r; gesehen: %s — 'discover' zeigt die Flotte.",
+                      selector, seen)
+            sys.exit(1)
+        device = picked[0]
+    elif len(bridges) > 1:
         LOG.info("Multiple devices found:")
-        for i, d in enumerate(pico_devices):
-            LOG.info("  [%d] %s (%s) RSSI=%d", i, d.name, d.address, d.rssI if hasattr(d, 'rssi') else 0)
+        for i, d in enumerate(bridges):
+            LOG.info("  [%d] %s (%s) RSSI=%d", i, d.name, d.address,
+                     d.rssi if hasattr(d, "rssi") else 0)
         choice = int(input("Select device: "))
-        device = pico_devices[choice]
+        device = bridges[choice]
     else:
-        device = pico_devices[0]
+        device = bridges[0]
     LOG.info("Connecting to %s (%s)", device.name, device.address)
     client = BleakClient(device)
     await client.connect()
@@ -491,7 +516,7 @@ async def cmd_stage(args):
         payload_bytes=raw,
     )
 
-    device, client = await scan_and_connect(args.timeout)
+    device, client = await scan_and_connect(args.timeout, getattr(args, 'device_selector', None))
     try:
         noise = await perform_noise_handshake(client, args.noise_identity)
         await send_command(client, packet, noise=noise)
@@ -512,7 +537,7 @@ async def cmd_stage(args):
 async def cmd_confirm(args):
     """Confirm a previously staged entry."""
     packet = build_confirm_packet(args.owner, args.id)
-    device, client = await scan_and_connect(args.timeout)
+    device, client = await scan_and_connect(args.timeout, getattr(args, 'device_selector', None))
     try:
         noise = await perform_noise_handshake(client, args.noise_identity)
         await send_command(client, packet, noise=noise)
@@ -524,7 +549,7 @@ async def cmd_confirm(args):
 async def cmd_cancel(args):
     """Cancel a previously staged entry."""
     packet = build_cancel_packet(args.owner, args.id)
-    device, client = await scan_and_connect(args.timeout)
+    device, client = await scan_and_connect(args.timeout, getattr(args, 'device_selector', None))
     try:
         noise = await perform_noise_handshake(client, args.noise_identity)
         await send_command(client, packet, noise=noise)
@@ -554,7 +579,7 @@ async def cmd_controller_add(args):
     """Add a public controller key through an authenticated admin session."""
     public_key = load_enrollment_public(args.public)
     role = CONTROLLER_ROLE_OPERATOR if args.role == "operator" else CONTROLLER_ROLE_ADMIN
-    device, client = await scan_and_connect(args.timeout)
+    device, client = await scan_and_connect(args.timeout, getattr(args, 'device_selector', None))
     try:
         noise = await perform_noise_handshake(client, args.noise_identity)
         await send_command(client, bytes([CMD_CONTROLLER_ADD, role]) + public_key, noise=noise)
@@ -567,7 +592,7 @@ async def cmd_controller_revoke(args):
     """Revoke one non-recovery controller slot through another admin session."""
     if not 1 <= args.slot <= 4:
         raise NoiseHandshakeError("controller slot must be in 1..4")
-    device, client = await scan_and_connect(args.timeout)
+    device, client = await scan_and_connect(args.timeout, getattr(args, 'device_selector', None))
     try:
         noise = await perform_noise_handshake(client, args.noise_identity)
         await send_command(client, bytes([CMD_CONTROLLER_REVOKE, args.slot]), noise=noise)
@@ -607,7 +632,7 @@ async def cmd_set_radio(args):
             raise NoiseHandshakeError(f"cannot read PSK file: {exc}") from exc
     else:
         raw = getpass.getpass("Wi-Fi passphrase (hidden): ").encode("utf-8")
-    device, client = await scan_and_connect(args.timeout)
+    device, client = await scan_and_connect(args.timeout, getattr(args, 'device_selector', None))
     try:
         noise = await perform_noise_handshake(client, args.noise_identity)
         await send_command(client, build_set_radio_packet(args.ssid.encode("utf-8"), raw), noise=noise)
@@ -618,7 +643,7 @@ async def cmd_set_radio(args):
 
 async def cmd_clear_radio(args):
     """Erase provisioned Wi-Fi credentials (admin, unmounted device)."""
-    device, client = await scan_and_connect(args.timeout)
+    device, client = await scan_and_connect(args.timeout, getattr(args, 'device_selector', None))
     try:
         noise = await perform_noise_handshake(client, args.noise_identity)
         await send_command(client, bytes([CMD_CLEAR_RADIO]), noise=noise)
@@ -648,9 +673,35 @@ def decode_receipt_status_raw(noise, receipt):
     return plaintext[-1]
 
 
+async def cmd_discover(args):
+    """List every PicoBridge in radio range with its fleet suffix."""
+    from bleak import BleakScanner
+    devices = await BleakScanner.discover(timeout=args.timeout)
+    bridges = sorted((d for d in devices if "PicoBridge" in (d.name or "")),
+                     key=lambda d: d.name or "")
+    fleet = pico_fleet.load_fleet()
+    by_target = {}
+    for alias, entry in fleet.items():
+        for key in ("ble", "host"):
+            if key in entry:
+                by_target.setdefault(entry[key].lower(), []).append(alias)
+    if not bridges:
+        LOG.info("Keine PicoBridge in Reichweite.")
+    for d in bridges:
+        suffix = (d.name or "")[len("PicoBridge-"):]
+        aliases = by_target.get(d.address.lower(), [])
+        hint = f"  Alias: {', '.join(aliases)}" if aliases else ""
+        LOG.info("%-22s %s  Suffix %s%s", d.name, d.address,
+                 suffix or "(Vor-Fleet-Firmware)", hint)
+    extra = [a for a, e in fleet.items()
+             if not any(b.address.lower() == e.get("ble", "").lower() for b in bridges)]
+    if extra:
+        LOG.info("Aus fleet.json, aber nicht sichtbar: %s", ", ".join(sorted(extra)))
+
+
 async def cmd_net_debug(args):
     """Raw cyw43 link status: receipt status = 40 + CYW43_LINK_*."""
-    device, client = await scan_and_connect(args.timeout)
+    device, client = await scan_and_connect(args.timeout, getattr(args, 'device_selector', None))
     try:
         noise = await perform_noise_handshake(client, args.noise_identity)
         packet = noise.encrypt_packet(bytes([CMD_NET_DEBUG]))
@@ -781,7 +832,7 @@ async def cmd_net_status(args):
     the network state: 0=no radio record, 1=waiting for retry window,
     2=associating/no IPv4 yet, 3=ready (TCP :44901 listening).
     """
-    device, client = await scan_and_connect(args.timeout)
+    device, client = await scan_and_connect(args.timeout, getattr(args, 'device_selector', None))
     try:
         noise = await perform_noise_handshake(client, args.noise_identity)
         packet = noise.encrypt_packet(bytes([CMD_NET_STATUS]))
@@ -795,10 +846,46 @@ async def cmd_net_status(args):
         await client.disconnect()
 
 
+def add_device_argument(command):
+    command.add_argument(
+        "--device", default=None, metavar="GERÄT",
+        help="Ziel-Pico: 4-stelliges Flotten-Suffix (z.B. ab12), vollständiger "
+             "Name PicoBridge-ab12 oder MAC. Ohne Option: erste gefundene "
+             "Brücke. Aliase aus ~/.config/pico-bridge/fleet.json "
+             "überschreiben host/ble/identity dieses Kommandos.",
+    )
+
+
+def _apply_fleet(args, parser):
+    """Resolve --device and fleet aliases into selector/host/identity.
+
+    Explicit --noise-identity on the command line always wins over the
+    fleet entry (an operator may deliberately talk to a device with a
+    different enrollment).
+    """
+    selector = getattr(args, "device", None)
+    entry = pico_fleet.resolve(selector)
+    if entry:
+        if "ble" in entry:
+            selector = entry["ble"]
+        if "identity" in entry and args.noise_identity == _FLEET_DEFAULT_IDENTITY:
+            args.noise_identity = Path(pico_fleet.expand_path(entry["identity"]))
+        LOG.info("Flotte: %s%s", entry.get("ble", selector),
+                 " [identity aus fleet]" if "identity" in entry else "")
+    elif selector is not None and not pico_fleet.MAC_RE.fullmatch(selector):
+        known = ", ".join(sorted(pico_fleet.load_fleet())) or "(keine)"
+        LOG.info("--device %r: kein Alias (bekannt: %s), als Suffix/Name behandelt",
+                 selector, known)
+    args.device_selector = selector
+
+
+_FLEET_DEFAULT_IDENTITY = Path.home() / ".config" / "pico-bridge" / "noise-ik.json"
+
+
 def add_noise_identity_argument(command):
     command.add_argument(
         "--noise-identity", type=Path,
-        default=Path.home() / ".config" / "pico-bridge" / "noise-ik.json",
+        default=_FLEET_DEFAULT_IDENTITY,
         help="Private local Noise IK identity (default: ~/.config/pico-bridge/noise-ik.json)",
     )
 
@@ -882,11 +969,16 @@ def main():
     add_noise_identity_argument(net_status)
     net_status.set_defaults(func=cmd_net_status)
 
+    discover = sub.add_parser("discover", help="Alle PicoBridges in Reichweite auflisten")
+    discover.add_argument("--timeout", type=int, default=10)
+    discover.set_defaults(func=cmd_discover)
+
     net_debug = sub.add_parser("net-debug", help="Raw cyw43 link status (net builds)")
     net_debug.add_argument("--timeout", type=int, default=10)
     add_noise_identity_argument(net_debug)
     net_debug.set_defaults(func=cmd_net_debug)
 
+    add_device_argument(parser)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -895,6 +987,7 @@ def main():
         format="%(levelname)s: %(message)s",
     )
 
+    _apply_fleet(args, parser)
     try:
         asyncio.run(args.func(args))
     except NoiseHandshakeError as exc:

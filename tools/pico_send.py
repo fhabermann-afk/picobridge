@@ -42,9 +42,28 @@ def load_ctl():
     return module
 
 
-def read_cached_device():
+def _fleet():
     try:
-        addr = CACHE_PATH.read_text().strip()
+        import pico_fleet
+        return pico_fleet
+    except ImportError:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location("pico_fleet", HERE / "pico_fleet.py")
+        module = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+def cache_path_for(selector):
+    if not selector:
+        return CACHE_PATH
+    safe = "".join(c if c.isalnum() else "_" for c in selector)
+    return CACHE_PATH.with_name(f"last-device-{safe}")
+
+
+def read_cached_device(selector=None):
+    try:
+        addr = cache_path_for(selector).read_text().strip()
     except OSError:
         return None
     # BLE address (public or random): 12 hex digits with : or - separators
@@ -54,15 +73,16 @@ def read_cached_device():
     return None
 
 
-def write_cached_device(addr):
+def write_cached_device(addr, selector=None):
     try:
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(addr + "\n")
+        path = cache_path_for(selector)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(addr + "\n")
     except OSError:
         pass  # cache is a speed-up only, never fatal
 
 
-async def connect_fast(ctl, timeout, retries, rescan):
+async def connect_fast(ctl, timeout, retries, rescan, selector=None):
     """Connect with the lowest possible latency.
 
     1. If we talked to a PicoBridge before, connect straight to its cached
@@ -82,7 +102,7 @@ async def connect_fast(ctl, timeout, retries, rescan):
     for attempt in range(1, retries + 1):
         if attempt > 1:
             await asyncio.sleep(2)
-        cached = None if rescan else read_cached_device()
+        cached = None if rescan else read_cached_device(selector)
         if cached:
             try:
                 client = BleakClient(cached)
@@ -97,9 +117,14 @@ async def connect_fast(ctl, timeout, retries, rescan):
             match = None
             found = asyncio.Event()
 
+            fleet = _fleet()
+
             async def on_adv(device, advertisement):
                 nonlocal match
-                if match is None and "PicoBridge" in (device.name or ""):
+                if match is not None or "PicoBridge" not in (device.name or ""):
+                    return
+                if selector is None or fleet.ble_matches(device.name, selector) \
+                        or device.address.upper() == str(selector).upper():
                     match = device
                     found.set()
 
@@ -114,10 +139,13 @@ async def connect_fast(ctl, timeout, retries, rescan):
             finally:
                 await scanner.stop()
             if match is None:
+                if selector:
+                    raise RuntimeError(f"Kein PicoBridge auf {selector!r} in Reichweite.")
                 raise RuntimeError("No PicoBridge device found in range.")
             client = BleakClient(match)
             await asyncio.wait_for(client.connect(**FAST_PAGE), timeout=timeout)
-            write_cached_device(client.address if hasattr(client, "address") else match.address)
+            write_cached_device(client.address if hasattr(client, "address") else match.address,
+                                selector)
             return match.address, client
         except Exception as exc:
             last = exc
@@ -195,6 +223,18 @@ async def run(args):
         else ctl.BRIDGE_MODE_PASSWORD
     layout = ctl.BRIDGE_LAYOUT_DE if args.layout == "de" else ctl.BRIDGE_LAYOUT_US
     owner = args.owner if args.owner is not None else os.geteuid()
+    selector = args.device
+    fleet = _fleet()
+    entry = fleet.resolve(selector)
+    if entry:
+        if entry.get("ble"):
+            selector = entry["ble"]
+        if args.identity is None and entry.get("identity"):
+            args.identity = Path(entry["identity"]).expanduser()
+        print(f"Flotte: {args.device} -> {entry.get('ble', selector)}", file=sys.stderr)
+    elif selector and not fleet.MAC_RE.fullmatch(selector):
+        print(f"--device {selector!r}: kein Alias, als Suffix/Name behandelt",
+              file=sys.stderr)
     identity = args.identity or resolve_default_identity()
     if not identity.is_file():
         raise SystemExit(f"Noise-Identität nicht gefunden: {identity}\n"
@@ -205,7 +245,8 @@ async def run(args):
     # back-to-back so the device's short stage TTL can never expire.
     # With a cached device address this costs ~1-3 s and happens while the
     # user is still switching to the target window.
-    device, client = await connect_fast(ctl, args.timeout, args.retries, args.rescan)
+    device, client = await connect_fast(ctl, args.timeout, args.retries, args.rescan,
+                                        selector)
     try:
         noise = await ctl.perform_noise_handshake(client, str(identity))
 
@@ -253,6 +294,10 @@ def main():
     parser.add_argument("--identity", type=Path, default=None,
                         help="Noise-Identitaet (Default: gefundene unter "
                              "~/.config/pico-bridge/ oder private/noise-ik-current/)")
+    parser.add_argument("--device", default=None, metavar="GERÄT",
+                        help="Ziel-Pico: 4-stelliges Suffix (z.B. ab12), Name "
+                             "PicoBridge-ab12, MAC oder Alias aus "
+                             "~/.config/pico-bridge/fleet.json")
     parser.add_argument("--retries", type=int, default=5, help="BLE-Scan-Wiederholungen")
     parser.add_argument("--timeout", type=int, default=10, help="BLE-Scan-Timeout (s)")
     parser.add_argument("--rescan", action="store_true",

@@ -23,6 +23,7 @@ has to trust anyway — and PicoBridge only ever *types*, through a channel
 that is mutually authenticated and encrypted before a single keystroke.
 
 
+> **Mehrere Picos:** [docs/FLEET.md](docs/FLEET.md) — Geräte-Suffixe, fleet.json, gezieltes Ansteuern.
 > **Controller rollout:** [docs/CLIENT-SETUP.md](docs/CLIENT-SETUP.md) covers the Python venv, Noise identity, clipboard use, firmware flashing, and first TCP/BLE commands.
 ## Status
 

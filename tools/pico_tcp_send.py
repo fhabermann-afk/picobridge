@@ -155,9 +155,11 @@ def stage_and_confirm(session, ctl, packet, confirm, label,
         raise SystemExit(f"{label}-confirm abgelehnt (status={status})")
 
 
-def resolve_identity(explicit: str | None) -> str:
+def resolve_identity(explicit: str | None, fleet_entry=None) -> str:
     if explicit:
         return explicit
+    if fleet_entry and fleet_entry.get("identity"):
+        return str(Path(fleet_entry["identity"]).expanduser())
     candidates = [
         Path.home() / ".config/pico-bridge/noise-ik.json",
         HERE.parent / "private/noise-ik-current/noise-ik.json",
@@ -189,7 +191,22 @@ async def amain():
     args = parser.parse_args()
 
     ctl = load_ctl()
-    host, _, port_s = args.target.partition(":")
+    try:
+        import pico_fleet
+    except ImportError:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("pico_fleet", HERE / "pico_fleet.py")
+        pico_fleet = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(pico_fleet)
+    fleet_entry = pico_fleet.resolve(args.target)
+    if fleet_entry:
+        if not fleet_entry.get("host"):
+            raise SystemExit(f"fleet-Alias {args.target!r} hat keinen host-Eintrag")
+        print(f"Flotte: {args.target} -> {fleet_entry['host']}", file=sys.stderr)
+        target = fleet_entry["host"]
+    else:
+        target = args.target
+    host, _, port_s = target.partition(":")
     port = int(port_s) if port_s else DEFAULT_PORT
 
     sources = sum((args.stdin, args.clipboard, args.text is not None))
@@ -212,7 +229,7 @@ async def amain():
         else ctl.BRIDGE_MODE_PASSWORD
     layout = ctl.BRIDGE_LAYOUT_DE if args.layout == "de" else ctl.BRIDGE_LAYOUT_US
     owner = os.geteuid()
-    identity = resolve_identity(args.identity)
+    identity = resolve_identity(args.identity, fleet_entry)
 
     def exchange():
         with NoiseTcpSession(ctl, host, port, identity) as s:
