@@ -21,7 +21,7 @@ python3 tools/pico_send.py                                       # pre-fleet dev
 
 ```json
 {
-  "szczecin": {"host": "192.0.2.34", "ble": "AA:BB:CC:DD:EE:01",
+  "office": {"host": "192.0.2.34", "ble": "AA:BB:CC:DD:EE:01",
                "identity": "~/.config/pico-bridge/pico-01.json"},
   "lab":      {"host": "picobridge-ab12.local",
                "identity": "~/.config/pico-bridge/pico-02.json"}
